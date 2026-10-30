@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""hmd: put things on the handmedown board from a script or a terminal.
+
+    hmd push "Title" ["markdown body" | -] [--id ID] [--tone info|ok|warn|error|ask]
+    hmd remove ID | --all
+    hmd status working|waiting|done|idle|off ["label"] [--source NAME]
+    hmd board                 print what's on the board (JSON)
+    hmd hook                  Claude Code hook: reads the event JSON on stdin
+
+The server URL comes from $HANDMEDOWN_URL, else the port in handmedown.json,
+else http://127.0.0.1:8800.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REPLY_CHARS = 4000
+
+
+def server_url():
+    if os.environ.get("HANDMEDOWN_URL"):
+        return os.environ["HANDMEDOWN_URL"].rstrip("/")
+    port = 8800
+    try:
+        port = int(json.loads((ROOT / "handmedown.json").read_text()).get("port", port))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return f"http://127.0.0.1:{port}"
+
+
+def call(path, payload=None, timeout=5):
+    req = urllib.request.Request(server_url() + path)
+    if payload is not None:
+        req.data = json.dumps(payload).encode("utf-8")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Handmedown", "1")
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        return json.load(res)
+
+
+# ---------------------------------------------------------------- Claude Code hook
+
+def last_reply(event):
+    """Best effort: the text of Claude's final message in this session."""
+    if isinstance(event.get("last_assistant_message"), str):
+        return event["last_assistant_message"]
+    path = event.get("transcript_path")
+    if not path:
+        return ""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, str):
+            return content
+        texts = [c.get("text", "") for c in content or [] if c.get("type") == "text"]
+        if any(t.strip() for t in texts):
+            return "\n\n".join(texts)
+    return ""
+
+
+def hook():
+    """Mirror a Claude Code session on the board. Never fails the hook."""
+    try:
+        event = json.load(sys.stdin)
+        name = event.get("hook_event_name", "")
+        session = str(event.get("session_id", "default"))[:8]
+        project = Path(event.get("cwd") or ".").name or "claude"
+        source = f"claude-{session}"
+        ask_card, reply_card = f"{source}-ask", f"{source}-reply"
+
+        if name == "SessionStart":
+            call("/api/status", {"source": source, "state": "idle", "label": project}, 2)
+        elif name in ("UserPromptSubmit", "PostToolUse"):
+            call("/api/status", {"source": source, "state": "working", "label": project}, 2)
+            call("/api/remove", {"id": ask_card}, 2)
+        elif name == "Notification":
+            message = event.get("message") or "Claude needs your input"
+            call("/api/status", {"source": source, "state": "waiting", "label": project}, 2)
+            call("/api/push", {"id": ask_card, "tone": "ask",
+                               "title": f"{project}: Claude needs you", "body": message}, 2)
+        elif name == "Stop":
+            call("/api/status", {"source": source, "state": "done", "label": project}, 2)
+            call("/api/remove", {"id": ask_card}, 2)
+            reply = last_reply(event).strip()
+            if len(reply) > REPLY_CHARS:
+                reply = reply[:REPLY_CHARS].rstrip() + "\n\n…"
+            call("/api/push", {"id": reply_card, "tone": "ok",
+                               "title": f"{project}: done", "body": reply}, 2)
+        elif name == "SessionEnd":
+            call("/api/status", {"source": source, "state": "off"}, 2)
+            call("/api/remove", {"id": ask_card}, 2)
+    except Exception:  # the board being down must never break Claude
+        pass
+    return 0
+
+
+# ---------------------------------------------------------------- CLI
+
+def main():
+    parser = argparse.ArgumentParser(prog="hmd", description="Put things on the handmedown board.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    push = sub.add_parser("push", help="add or update a card")
+    push.add_argument("title")
+    push.add_argument("body", nargs="?", default="", help="markdown, or - to read stdin")
+    push.add_argument("--id", help="reuse an id to update that card in place")
+    push.add_argument("--tone", default="info", choices=["info", "ok", "warn", "error", "ask"])
+
+    remove = sub.add_parser("remove", help="take a card down")
+    remove.add_argument("id", nargs="?")
+    remove.add_argument("--all", action="store_true")
+
+    status = sub.add_parser("status", help="set a session's state on the status ring")
+    status.add_argument("state", choices=["idle", "working", "waiting", "done", "off"])
+    status.add_argument("label", nargs="?", default="")
+    status.add_argument("--source", default="default")
+
+    sub.add_parser("board", help="print the board as JSON")
+    sub.add_parser("hook", help="Claude Code hook entry point (event JSON on stdin)")
+
+    args = parser.parse_args()
+    if args.cmd == "hook":
+        return hook()
+    try:
+        if args.cmd == "push":
+            body = sys.stdin.read() if args.body == "-" else args.body
+            payload = {"title": args.title, "body": body, "tone": args.tone}
+            if args.id:
+                payload["id"] = args.id
+            print(call("/api/push", payload)["id"])
+        elif args.cmd == "remove":
+            if not args.id and not args.all:
+                parser.error("remove needs an ID or --all")
+            found = call("/api/remove", {"id": args.id, "all": args.all})["removed"]
+            if not found:
+                print(f"hmd: no card {args.id!r}", file=sys.stderr)
+                return 1
+        elif args.cmd == "status":
+            call("/api/status", {"source": args.source, "state": args.state, "label": args.label})
+        elif args.cmd == "board":
+            print(json.dumps(call("/api/board"), indent=2))
+    except urllib.error.HTTPError as err:
+        detail = json.loads(err.read() or b"{}").get("error", err.reason)
+        print(f"hmd: {detail}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError:
+        print(f"hmd: handmedown isn't running at {server_url()} (start it with ./start.sh)",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

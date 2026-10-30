@@ -5,16 +5,21 @@
 // steps card motion once per frame.
 
 import { renderMarkdown } from "./markdown.js";
+import { Look } from "./look.js";
 
 const MEDIAPIPE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const HAND_MODEL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
-const PINCH_ON = 0.28;   // thumb-index gap / palm length: below this starts a pinch
-const PINCH_OFF = 0.42;  // ...above this ends it (hysteresis stops flicker)
+// A card is held exactly while index tip and thumb tip touch. Measured as the
+// tip gap over palm length, so it holds at any distance from the camera.
+const PINCH_ON = 0.28;   // tips closer than this: touching, grab
+const PINCH_OFF = 0.32;  // tips farther than this: apart, let go
 const TAP_MS = 1000;     // pinch shorter than this, with little palm travel, is a tap
 const TAP_PX = 45;
 const LOST_MS = 180;     // a hand missing longer than this is released
+const GAZE_SNAP_PX = 160; // a look within this far of a card's edge chooses it
+const GAZE_STICKY_PX = 60; // the chosen card keeps it unless another is clearly closer
 const MIN_SCALE = 0.4;
 const MAX_SCALE = 3;
 
@@ -26,6 +31,7 @@ const debugCanvas = document.getElementById("debug");
 const boardEl = document.getElementById("board");
 const cursorsEl = document.getElementById("cursors");
 const statusEl = document.getElementById("hud-status");
+const presenceEl = document.getElementById("presence");
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
@@ -130,11 +136,19 @@ function stepCards(dt) {
     } else if (card.vx || card.vy) {
       card.x += card.vx * dt;
       card.y += card.vy * dt;
-      const drag = Math.pow(0.05, dt);
+      const flickable = card.kind === "message";
+      const drag = Math.pow(flickable ? 0.4 : 0.05, dt);
       card.vx *= drag;
       card.vy *= drag;
-      if (card.x < 0 || card.x > w) { card.x = clamp(card.x, 0, w); card.vx *= -0.6; }
-      if (card.y < 0 || card.y > h) { card.y = clamp(card.y, 0, h); card.vy *= -0.6; }
+      if (flickable) {
+        if (card.x < -150 || card.x > w + 150 || card.y < -150 || card.y > h + 150) {
+          dismissMessage(card);
+          continue;
+        }
+      } else {
+        if (card.x < 0 || card.x > w) { card.x = clamp(card.x, 0, w); card.vx *= -0.6; }
+        if (card.y < 0 || card.y > h) { card.y = clamp(card.y, 0, h); card.vy *= -0.6; }
+      }
       if (Math.hypot(card.vx, card.vy) < 8) card.vx = card.vy = 0;
     }
     render(card);
@@ -200,7 +214,7 @@ function pinchDown(p, now) {
   p.downY = p.ay;
   p.travel = 0;
   setHover(p, null);
-  const card = cardAt(p.x, p.y);
+  const card = cardAt(p.x, p.y) ?? (p.id !== "mouse" ? gazeCard : null);
   if (!card) {
     if (p.id !== "mouse") say("pinch: no card under your fingers");
     return;
@@ -263,6 +277,7 @@ function pinchUp(p, now, lost) {
 }
 
 function dropPointer(p, now) {
+  pinchGates.delete(p.id);
   if (p.pinching) pinchUp(p, now, true);
   setHover(p, null);
   p.el.remove();
@@ -426,15 +441,104 @@ async function toggleNote(card) {
   raise(card);
 }
 
+// ---------------------------------------------------------------- live board
+
+// Cards pushed by scripts and Claude (bin/hmd). The server owns them; the page
+// mirrors its snapshot, so cards pushed while the page was hidden are waiting.
+const messageCards = new Map(); // server card id -> card
+
+function fillMessage(card, msg) {
+  const time = new Date(msg.updated * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  card.el.className = card.el.className.replace(/\btone-\w+/g, "").trim() + ` tone-${msg.tone}`;
+  card.el.querySelector(".title").textContent = msg.title;
+  card.el.querySelector(".meta").textContent = time;
+  card.el.querySelector(".body").innerHTML = msg.body ? renderMarkdown(msg.body) : "";
+  card.data.updated = msg.updated;
+}
+
+// Next free spot in the columns down the right-hand side.
+function messageSpot() {
+  const slot = messageCards.size;
+  const perColumn = Math.max(1, Math.floor((innerHeight - 140) / 120));
+  const col = Math.floor(slot / perColumn), row = slot % perColumn;
+  return {
+    x: clamp(innerWidth - 200 - col * 360, 180, innerWidth - 180),
+    y: 110 + row * 120,
+  };
+}
+
+function applyBoard({ cards: list, sessions }) {
+  const live = new Set();
+  for (const msg of list) {
+    live.add(msg.id);
+    let card = messageCards.get(msg.id);
+    if (!card) {
+      const spot = messageSpot();
+      card = spawnCard({
+        kind: "message",
+        html: '<div class="title"></div><div class="meta"></div><div class="body"></div>',
+        ...spot,
+        from: { x: spot.x, y: -120 },
+        data: { serverId: msg.id },
+      });
+      messageCards.set(msg.id, card);
+      fillMessage(card, msg);
+    } else if (card.data.updated !== msg.updated) {
+      fillMessage(card, msg);
+      raise(card);
+    }
+  }
+  for (const [id, card] of messageCards) {
+    if (!live.has(id)) {
+      messageCards.delete(id);
+      removeCard(card);
+    }
+  }
+  renderSessions(sessions);
+}
+
+function dismissMessage(card) {
+  if (card.removing) return;
+  messageCards.delete(card.data.serverId);
+  removeCard(card);
+  api("/api/remove", { id: card.data.serverId }).catch(() => {});
+}
+
+const STATE_RANK = { waiting: 3, working: 2, done: 1, idle: 0 };
+const STATE_WORDS = { waiting: "needs you", working: "working", done: "done", idle: "idle" };
+
+function renderSessions(sessions) {
+  const sorted = [...sessions].sort((a, b) => STATE_RANK[b.state] - STATE_RANK[a.state]);
+  presenceEl.hidden = !sorted.length;
+  presenceEl.className = sorted.length ? `state-${sorted[0].state}` : "";
+  presenceEl.querySelector(".list").innerHTML = sorted
+    .map((s) => `<div class="session state-${s.state}"><span class="dot"></span>` +
+      `${escapeText(s.label || s.source)} <span class="word">${STATE_WORDS[s.state]}</span></div>`)
+    .join("");
+}
+
+function connectBoard() {
+  // EventSource reconnects by itself if the server restarts.
+  const events = new EventSource("/api/events");
+  events.onmessage = (e) => applyBoard(JSON.parse(e.data));
+}
+
 function onTap(card) {
   if (card.kind === "launcher") openLauncher(card);
   else if (card.kind === "folder") openFolder(card);
   else if (card.kind === "note") toggleNote(card);
   else if (card.kind === "action") runAction(card);
+  else if (card.kind === "message") {
+    card.el.classList.toggle("open");
+    raise(card);
+  }
 }
 
 function clearBoard() {
-  for (const card of cards.values()) if (card.kind !== "launcher") removeCard(card);
+  // Pushed cards stay: flick them away to dismiss them for good.
+  for (const card of cards.values()) {
+    if (card.kind !== "launcher" && card.kind !== "message") removeCard(card);
+  }
   for (const l of launchers) l.el.classList.remove("expanded");
 }
 
@@ -462,13 +566,33 @@ addEventListener("wheel", (e) => {
   card.scale = clamp(card.scale * Math.exp(-e.deltaY * 0.002), MIN_SCALE, MAX_SCALE);
 }, { passive: false });
 addEventListener("keydown", (e) => {
-  if (e.key === "Escape" || e.key === "c") clearBoard();
+  if (e.key === "Escape" || e.key === "c") {
+    look.cancelCalibration();
+    clearBoard();
+  } else if (e.key === "g") {
+    // Cycle look mode: off -> head -> eyes -> off.
+    const next = { off: "head", head: "eyes", eyes: "off" }[look.mode];
+    look.setMode(next).catch((err) => say(`face tracking failed: ${err.message}`));
+  } else if (e.key === "k") {
+    look.calibrate();
+  }
 });
 
 // ---------------------------------------------------------------- hand tracking
 
 let landmarker = null;
 let lastVideoTime = -1;
+let visionPromise = null;
+
+// MediaPipe's vision bundle and wasm, shared by the hand and face trackers.
+function loadVision() {
+  visionPromise ??= (async () => {
+    const mod = await import(`${MEDIAPIPE}/vision_bundle.mjs`);
+    const fileset = await mod.FilesetResolver.forVisionTasks(`${MEDIAPIPE}/wasm`);
+    return { mod, fileset };
+  })();
+  return visionPromise;
+}
 
 // Map a normalized landmark to screen px, matching the mirrored, object-fit:
 // cover video underneath.
@@ -489,9 +613,66 @@ function say(text) {
   sayUntil = performance.now() + 2500;
 }
 
+// Per hand: after a release the tips must clearly part (past PINCH_OFF)
+// before the next grab, so jitter at the moment of letting go can't re-grab.
+const pinchGates = new Map();
+
+function pinchGate(id, ratio) {
+  let g = pinchGates.get(id);
+  if (!g) pinchGates.set(id, (g = { armed: true }));
+  if (pointers.get(id)?.pinching) {
+    if (ratio <= PINCH_OFF) return true;
+    g.armed = false;
+    return false;
+  }
+  if (ratio > PINCH_OFF) g.armed = true;
+  return g.armed && ratio < PINCH_ON;
+}
+
+// ---------------------------------------------------------------- look to choose
+
+const look = new Look({ loadVision, video, say, Filter: OneEuro, onDoubleBlink });
+let gazeCard = null;
+
+// Double blink: tap the card you're looking at, hands-free.
+function onDoubleBlink() {
+  if (!gazeCard) return say("double blink: look at a card first");
+  say("double blink");
+  const el = gazeCard.el;
+  el.classList.remove("blinked");
+  void el.offsetWidth; // restart the flash
+  el.classList.add("blinked");
+  onTap(gazeCard);
+}
+
+// The card nearest the look point (0 inside it), if any is close enough.
+function updateGazeCard(pt) {
+  let best = null, bestD = Infinity, currentD = Infinity;
+  if (pt) {
+    for (const card of cards.values()) {
+      if (card.removing) continue;
+      const r = card.el.getBoundingClientRect();
+      const d = Math.hypot(
+        Math.max(r.left - pt.x, 0, pt.x - r.right),
+        Math.max(r.top - pt.y, 0, pt.y - r.bottom),
+      );
+      if (d < bestD) { best = card; bestD = d; }
+      if (card === gazeCard) currentD = d;
+    }
+  }
+  let next = bestD < GAZE_SNAP_PX ? best : null;
+  if (gazeCard && currentD < GAZE_SNAP_PX && currentD < bestD + GAZE_STICKY_PX) next = gazeCard;
+  if (next === gazeCard) return;
+  gazeCard?.el.classList.remove("gazed");
+  gazeCard = next;
+  gazeCard?.el.classList.add("gazed");
+}
+
 function trackHands(now) {
   if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
+  if (look.active) updateGazeCard(look.update(now));
+  else if (gazeCard) updateGazeCard(null);
   const result = landmarker.detectForVideo(video, now);
   const vw = video.videoWidth, vh = video.videoHeight;
   const used = new Set();
@@ -506,8 +687,11 @@ function trackHands(now) {
     const [tx, ty] = px(lms[4]), [ix, iy] = px(lms[8]);
     const [wx, wy] = px(lms[0]), [mx, my] = px(lms[9]);
     const ratio = dist(tx, ty, ix, iy) / Math.max(dist(wx, wy, mx, my), 1);
-    const was = pointers.get(id)?.pinching ?? false;
-    const pinching = was ? ratio < PINCH_OFF : ratio < PINCH_ON;
+    const pinching = pinchGate(id, ratio);
+    if (DEBUG && now > sayUntil) {
+      statusEl.textContent = `gap ${ratio.toFixed(2)} ${pinching ? "touching" : "apart"}` +
+        (look.active ? ` · blink ${look.blinkScore.toFixed(2)}` : "");
+    }
 
     const c = toScreen({ x: (lms[4].x + lms[8].x) / 2, y: (lms[4].y + lms[8].y) / 2 });
     updatePointer(id, c.x, c.y, pinching, now, true, toScreen(lms[9]));
@@ -517,7 +701,7 @@ function trackHands(now) {
     if (p.id !== "mouse" && now - p.seen > LOST_MS) dropPointer(p, now);
   }
   const hands = [...pointers.keys()].filter((k) => k !== "mouse").length;
-  if (now > sayUntil) statusEl.textContent = hands ? `${hands} hand${hands > 1 ? "s" : ""}` : "show a hand";
+  if (now > sayUntil && !(DEBUG && hands)) statusEl.textContent = hands ? `${hands} hand${hands > 1 ? "s" : ""}` : "show a hand";
   if (DEBUG) drawDebug(result.landmarks);
 }
 
@@ -541,12 +725,19 @@ function drawDebug(hands) {
   }
 }
 
+let cameraAllowed = false;
+
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
+    cameraAllowed = true;
+    if (document.hidden) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
     video.srcObject = stream;
     await video.play();
   } catch (err) {
@@ -557,15 +748,35 @@ async function startCamera() {
 
 async function startTracker() {
   statusEl.textContent = "loading hand tracking…";
-  const { FilesetResolver, HandLandmarker } = await import(`${MEDIAPIPE}/vision_bundle.mjs`);
-  const fileset = await FilesetResolver.forVisionTasks(`${MEDIAPIPE}/wasm`);
-  landmarker = await HandLandmarker.createFromOptions(fileset, {
+  const { mod, fileset } = await loadVision();
+  landmarker = await mod.HandLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetPath: HAND_MODEL, delegate: "GPU" },
     runningMode: "VIDEO",
     numHands: 2,
   });
   statusEl.textContent = "show a hand";
 }
+
+// The camera only runs while the board is on screen: swipe to another Space
+// or switch tabs and it switches off, and back on when you return.
+function stopCamera() {
+  video.srcObject?.getTracks().forEach((t) => t.stop());
+  video.srcObject = null;
+  lastVideoTime = -1;
+  look.pause();
+  updateGazeCard(null);
+  const now = performance.now();
+  for (const p of [...pointers.values()]) if (p.id !== "mouse") dropPointer(p, now);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopCamera();
+  else if (cameraAllowed && !video.srcObject) {
+    startCamera()
+      .then(() => { statusEl.textContent = landmarker ? "show a hand" : statusEl.textContent; })
+      .catch(() => {});
+  }
+});
 
 // ---------------------------------------------------------------- main loop
 
@@ -587,10 +798,15 @@ async function main() {
     })
     .catch(() => {});
   placeLaunchers();
+  connectBoard();
   requestAnimationFrame(frame);
   try {
     await startCamera();
     await startTracker();
+    const mode = params.get("look") ?? Look.savedMode();
+    if (["head", "eyes"].includes(mode)) {
+      look.setMode(mode).catch((err) => say(`face tracking failed: ${err.message}`));
+    }
   } catch (err) {
     console.warn("handmedown: hand tracking unavailable", err);
     if (video.srcObject) statusEl.textContent = "hand tracking failed to load: mouse mode";
