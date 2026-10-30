@@ -10,6 +10,7 @@ markdown notes. Standard library only. Binds to 127.0.0.1.
 import argparse
 import json
 import os
+import subprocess
 import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -18,8 +19,21 @@ from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
-DEFAULTS = {"name": "handmedown", "port": 8800, "notes": "sample-notes"}
+DEFAULTS = {
+    "name": "handmedown",
+    "port": 8800,
+    "notes": "sample-notes",
+    # Each action runs an argv list (no shell) from the project folder.
+    "actions": [
+        {"title": "Calculator", "run": ["open", "-a", "Calculator"]},
+        {"title": "What time is it?", "run": ["date", "+%A %-I:%M %p"]},
+        {"title": "Say hello", "run": ["say", "Hello from handmedown"]},
+        {"title": "Show notes folder", "run": ["open", "sample-notes"]},
+    ],
+}
 MAX_NOTE_BYTES = 512 * 1024
+ACTION_TIMEOUT = 20
+MAX_OUTPUT_CHARS = 2000
 
 
 def load_config(path):
@@ -31,6 +45,7 @@ def load_config(path):
     if not notes.is_absolute():
         notes = ROOT / notes
     config["notes"] = notes.resolve()
+    config["actions"] = valid_actions(config.get("actions"))
     return config
 
 
@@ -48,6 +63,31 @@ def note_tree(notes_root):
                 {"title": name[:-3], "path": (rel_dir / name).as_posix()}
             )
     return [{"name": k, "notes": v} for k, v in groups.items()]
+
+
+def valid_actions(raw):
+    actions = []
+    for a in raw or []:
+        run = a.get("run") if isinstance(a, dict) else None
+        if isinstance(run, list) and run and all(isinstance(x, str) for x in run):
+            actions.append({"title": str(a.get("title") or run[0]), "run": run})
+        else:
+            print(f"handmedown: skipping bad action {a!r} (needs a non-empty 'run' list)")
+    return actions
+
+
+def run_action(action):
+    try:
+        done = subprocess.run(
+            action["run"], cwd=ROOT, capture_output=True, text=True,
+            timeout=ACTION_TIMEOUT, stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "output": f"command not found: {action['run'][0]}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": f"timed out after {ACTION_TIMEOUT}s"}
+    output = (done.stdout + done.stderr).strip()[:MAX_OUTPUT_CHARS]
+    return {"ok": done.returncode == 0, "output": output}
 
 
 def resolve_note(notes_root, rel):
@@ -98,7 +138,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         notes_root = self.config["notes"]
         if url.path == "/api/config":
-            return self.send_json({"name": self.config["name"]})
+            titles = [a["title"] for a in self.config["actions"]]
+            return self.send_json({"name": self.config["name"], "actions": titles})
         if url.path == "/api/notes":
             if not notes_root.is_dir():
                 return self.send_json({"folders": [], "error": "notes folder not found"})
@@ -112,6 +153,30 @@ class Handler(SimpleHTTPRequestHandler):
                 text = f.read(MAX_NOTE_BYTES).decode("utf-8", errors="replace")
             return self.send_json({"title": target.stem, "path": rel, "markdown": text})
         return self.send_json({"error": "unknown endpoint"}, HTTPStatus.NOT_FOUND)
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        # Actions run commands, so only the board itself may trigger them: the
+        # custom header can't be sent cross-site without a CORS preflight,
+        # which this server never approves.
+        if (
+            url.path != "/api/run"
+            or not self.host_ok()
+            or self.headers.get("X-Handmedown") != "1"
+            or self.headers.get("Origin", f"http://{self.headers.get('Host')}")
+            != f"http://{self.headers.get('Host')}"
+        ):
+            return self.send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            index = json.loads(self.rfile.read(length) or b"{}").get("index")
+            if type(index) is not int or index < 0:
+                raise IndexError
+            action = self.config["actions"][index]
+        except (ValueError, TypeError, IndexError, AttributeError):
+            return self.send_json({"error": "no such action"}, HTTPStatus.BAD_REQUEST)
+        print(f"handmedown: running {action['title']!r}: {action['run']}", flush=True)
+        return self.send_json(run_action(action))
 
 
 def main():

@@ -71,8 +71,28 @@ html, body {
   background: radial-gradient(circle, rgba(242, 180, 90, 0.25), var(--glass) 70%);
 }
 
+.card.launcher.hover { box-shadow: 0 0 0 6px var(--accent-soft), 0 0 32px var(--accent), var(--shadow); }
 .card.folder .title::before { content: "▸ "; color: var(--accent); }
 .card.folder.expanded .title::before { content: "▾ "; }
+
+.card.action .meta { color: var(--accent); }
+.card.action.running { border-color: var(--accent); animation: pulse 0.9s ease-in-out infinite alternate; }
+.card.action.ok { border-color: #7fd18b; }
+.card.action.ok .meta { color: #7fd18b; }
+.card.action.failed { border-color: #ef7b6b; }
+.card.action.failed .meta { color: #ef7b6b; }
+.card.action .output:empty { display: none; }
+.card.action .output {
+  margin: 8px 0 0;
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+@keyframes pulse { to { box-shadow: 0 0 0 6px var(--accent-soft), var(--shadow); } }
 
 .card.note.open { max-width: 520px; width: 520px; }
 .card.note .body { display: none; }

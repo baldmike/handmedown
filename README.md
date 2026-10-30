@@ -31,11 +31,30 @@ you tap it. The server only reads `.md` files inside that folder. It listens on
 
 Options: `--port 8800`, `--config path/to/config.json`, `--verbose`.
 
+## Actions
+
+The **actions** ring holds cards that run something on your computer when you
+tap them: open an app or a website, run a script. List them in
+`handmedown.json`:
+
+```json
+"actions": [
+  { "title": "Calculator", "run": ["open", "-a", "Calculator"] },
+  { "title": "Backup", "run": ["./scripts/backup.sh"] }
+]
+```
+
+`run` is a command and its arguments, run from the project folder without a
+shell (so no pipes or `~`; wrap those in a script). The card shows the
+command's output and turns green or red. Only actions listed in the config
+can run: the board can't send its own commands, and other websites can't
+trigger them. Commands time out after 20 seconds.
+
 ## Gestures
 
 | Gesture | What it does |
 | --- | --- |
-| Tap (quick pinch) | Open or close the ring, a folder, or a note |
+| Tap (quick pinch) | Open a ring, a folder, or a note; run an action |
 | Pinch and drag | Move a card |
 | Let go mid-motion | Throw it |
 | Both hands pinch one card | Pull apart or push together to resize |
@@ -46,7 +65,7 @@ Add `?debug=1` to the URL to draw the tracked hand landmarks.
 ## Layout
 
 ```
-server.py         local server + read-only notes API
+server.py         local server: notes API and configured actions
 web/index.html    the board
 web/app.js        hand tracking, gestures, cards
 web/markdown.js   small, escaping markdown renderer

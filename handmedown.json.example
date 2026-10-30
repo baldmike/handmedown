@@ -1,5 +1,11 @@
 {
   "name": "handmedown",
   "port": 8800,
-  "notes": "sample-notes"
+  "notes": "sample-notes",
+  "actions": [
+    { "title": "Calculator", "run": ["open", "-a", "Calculator"] },
+    { "title": "What time is it?", "run": ["date", "+%A %-I:%M %p"] },
+    { "title": "Say hello", "run": ["say", "Hello from handmedown"] },
+    { "title": "Show notes folder", "run": ["open", "sample-notes"] }
+  ]
 }

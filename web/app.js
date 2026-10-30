@@ -12,8 +12,8 @@ const HAND_MODEL =
 
 const PINCH_ON = 0.28;   // thumb-index gap / palm length: below this starts a pinch
 const PINCH_OFF = 0.42;  // ...above this ends it (hysteresis stops flicker)
-const TAP_MS = 300;      // pinch shorter than this, with little travel, is a tap
-const TAP_PX = 28;
+const TAP_MS = 1000;     // pinch shorter than this, with little palm travel, is a tap
+const TAP_PX = 45;
 const LOST_MS = 180;     // a hand missing longer than this is released
 const MIN_SCALE = 0.4;
 const MAX_SCALE = 3;
@@ -162,11 +162,16 @@ function getPointer(id) {
   return p;
 }
 
-function updatePointer(id, rawX, rawY, pinching, now, smooth = true) {
+// `anchor` is the point used to tell a tap from a drag. For a hand it's the
+// palm: opening the fingers to release a pinch moves the fingertips but not
+// the palm, so a quick pinch still reads as a tap.
+function updatePointer(id, rawX, rawY, pinching, now, smooth = true, anchor = null) {
   const p = getPointer(id);
   const x = smooth ? p.fx.filter(rawX, now) : rawX;
   const y = smooth ? p.fy.filter(rawY, now) : rawY;
-  if (p.pinching) p.travel = Math.max(p.travel, dist(x, y, p.downX, p.downY));
+  p.ax = anchor ? anchor.x : x;
+  p.ay = anchor ? anchor.y : y;
+  if (p.pinching) p.travel = Math.max(p.travel, dist(p.ax, p.ay, p.downX, p.downY));
   p.x = x;
   p.y = y;
   p.seen = now;
@@ -191,12 +196,15 @@ function setHover(p, card) {
 function pinchDown(p, now) {
   p.pinching = true;
   p.downAt = now;
-  p.downX = p.x;
-  p.downY = p.y;
+  p.downX = p.ax;
+  p.downY = p.ay;
   p.travel = 0;
   setHover(p, null);
   const card = cardAt(p.x, p.y);
-  if (!card) return;
+  if (!card) {
+    if (p.id !== "mouse") say("pinch: no card under your fingers");
+    return;
+  }
   p.card = card;
   card.target = null;
   card.vx = card.vy = 0;
@@ -234,10 +242,13 @@ function pinchUp(p, now, lost) {
   }
   card.el.classList.remove("held");
   if (lost) return;
-  if (now - p.downAt < TAP_MS && p.travel < TAP_PX) {
+  const held = Math.round(now - p.downAt), moved = Math.round(p.travel);
+  if (held < TAP_MS && moved < TAP_PX) {
+    say(`tap (${held} ms)`);
     onTap(card);
     return;
   }
+  say(`grab, not a tap (${held} ms, moved ${moved} px)`);
   const first = p.hist[0], last = p.hist[p.hist.length - 1];
   const span = (last.t - first.t) / 1000;
   if (span > 0.02) {
@@ -258,13 +269,18 @@ function dropPointer(p, now) {
   pointers.delete(p.id);
 }
 
-// ---------------------------------------------------------------- notes
+// ---------------------------------------------------------------- notes & actions
 
-let launcher = null;
+const launchers = [];
 const noteCache = new Map();
+let actionTitles = [];
 
-async function api(path) {
-  const res = await fetch(path);
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Handmedown": "1" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return res.json();
 }
@@ -273,13 +289,16 @@ function escapeText(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 }
 
-function placeLauncher() {
-  launcher = spawnCard({
-    kind: "launcher",
-    html: '<div class="title">notes</div>',
-    x: innerWidth / 2,
-    y: innerHeight * 0.82,
-  });
+function placeLaunchers() {
+  for (const [menu, x] of [["notes", 0.4], ["actions", 0.6]]) {
+    launchers.push(spawnCard({
+      kind: "launcher",
+      html: `<div class="title">${menu}</div>`,
+      x: innerWidth * x,
+      y: innerHeight * 0.7,
+      data: { menu },
+    }));
+  }
 }
 
 function childrenOf(parent) {
@@ -309,6 +328,7 @@ function arc(n, cx, cy, radius) {
 
 async function openLauncher(card) {
   if (childrenOf(card).length) return closeChildren(card);
+  if (card.data.menu === "actions") return openActions(card);
   let folders;
   try {
     ({ folders } = await api("/api/notes"));
@@ -346,6 +366,46 @@ function openFolder(card) {
   card.el.classList.add("expanded");
 }
 
+function openActions(card) {
+  if (!actionTitles.length) {
+    say("no actions: add some to handmedown.json");
+    return;
+  }
+  const spots = arc(actionTitles.length, card.x, card.y, Math.min(innerHeight * 0.38, 320));
+  actionTitles.forEach((title, index) => {
+    spawnCard({
+      kind: "action",
+      html: `<div class="title">${escapeText(title)}</div><div class="meta">tap to run</div><pre class="output"></pre>`,
+      ...spots[index],
+      from: card,
+      data: { parent: card.id, index },
+    });
+  });
+  card.el.classList.add("expanded");
+}
+
+async function runAction(card) {
+  const el = card.el;
+  if (el.classList.contains("running")) return;
+  const meta = el.querySelector(".meta"), out = el.querySelector(".output");
+  el.classList.remove("ok", "failed");
+  el.classList.add("running");
+  meta.textContent = "running…";
+  out.textContent = "";
+  try {
+    const { ok, output } = await api("/api/run", { index: card.data.index });
+    el.classList.add(ok ? "ok" : "failed");
+    meta.textContent = ok ? "done ✓" : "failed ✗";
+    out.textContent = output;
+  } catch (err) {
+    el.classList.add("failed");
+    meta.textContent = "failed ✗";
+    out.textContent = err.message;
+  }
+  el.classList.remove("running");
+  raise(card);
+}
+
 async function toggleNote(card) {
   const el = card.el;
   if (el.classList.contains("open")) {
@@ -370,11 +430,12 @@ function onTap(card) {
   if (card.kind === "launcher") openLauncher(card);
   else if (card.kind === "folder") openFolder(card);
   else if (card.kind === "note") toggleNote(card);
+  else if (card.kind === "action") runAction(card);
 }
 
 function clearBoard() {
-  for (const card of cards.values()) if (card !== launcher) removeCard(card);
-  launcher.el.classList.remove("expanded");
+  for (const card of cards.values()) if (card.kind !== "launcher") removeCard(card);
+  for (const l of launchers) l.el.classList.remove("expanded");
 }
 
 // ---------------------------------------------------------------- mouse fallback
@@ -421,6 +482,13 @@ function toScreen(lm) {
   };
 }
 
+// Briefly show what the last pinch did, so gesture tuning isn't guesswork.
+let sayUntil = 0;
+function say(text) {
+  statusEl.textContent = text;
+  sayUntil = performance.now() + 2500;
+}
+
 function trackHands(now) {
   if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
@@ -442,14 +510,14 @@ function trackHands(now) {
     const pinching = was ? ratio < PINCH_OFF : ratio < PINCH_ON;
 
     const c = toScreen({ x: (lms[4].x + lms[8].x) / 2, y: (lms[4].y + lms[8].y) / 2 });
-    updatePointer(id, c.x, c.y, pinching, now);
+    updatePointer(id, c.x, c.y, pinching, now, true, toScreen(lms[9]));
   });
 
   for (const p of [...pointers.values()]) {
     if (p.id !== "mouse" && now - p.seen > LOST_MS) dropPointer(p, now);
   }
   const hands = [...pointers.keys()].filter((k) => k !== "mouse").length;
-  statusEl.textContent = hands ? `${hands} hand${hands > 1 ? "s" : ""}` : "show a hand";
+  if (now > sayUntil) statusEl.textContent = hands ? `${hands} hand${hands > 1 ? "s" : ""}` : "show a hand";
   if (DEBUG) drawDebug(result.landmarks);
 }
 
@@ -512,12 +580,13 @@ function frame(now) {
 
 async function main() {
   api("/api/config")
-    .then(({ name }) => {
+    .then(({ name, actions }) => {
       document.getElementById("hud-name").textContent = name;
       document.title = name;
+      actionTitles = actions || [];
     })
     .catch(() => {});
-  placeLauncher();
+  placeLaunchers();
   requestAnimationFrame(frame);
   try {
     await startCamera();
