@@ -28,13 +28,9 @@ DEFAULTS = {
     "name": "handmedown",
     "port": 8800,
     "notes": "sample-notes",
-    # Each action runs an argv list (no shell) from the project folder.
-    "actions": [
-        {"title": "Calculator", "run": ["open", "-a", "Calculator"]},
-        {"title": "What time is it?", "run": ["date", "+%A %-I:%M %p"]},
-        {"title": "Say hello", "run": ["say", "Hello from handmedown"]},
-        {"title": "Show notes folder", "run": ["open", "sample-notes"]},
-    ],
+    # Your own commands for the apps ring: each runs an argv list (no shell)
+    # from the project folder. None by default; built-in apps live in the page.
+    "actions": [],
 }
 MAX_NOTE_BYTES = 512 * 1024
 ACTION_TIMEOUT = 20
@@ -194,6 +190,116 @@ def run_action(action):
     return {"ok": done.returncode == 0, "output": output}
 
 
+# Spotify on this Mac, through its AppleScript dictionary. Only these fixed
+# scripts run; the volume step is the one number passed in, and it's clamped.
+# "if running" first, so asking for the status never launches Spotify.
+SPOTIFY_STATUS = """
+if application "Spotify" is not running then return "off"
+tell application "Spotify"
+  set out to (player state as string) & linefeed & (sound volume as string)
+  try
+    set out to out & linefeed & (player position as string) & linefeed & (duration of current track as string)
+    set out to out & linefeed & (name of current track) & linefeed & (artist of current track)
+  end try
+  return out
+end tell
+"""
+SPOTIFY_COMMANDS = {
+    "prev": 'tell application "Spotify" to previous track',
+    "playpause": 'tell application "Spotify" to playpause',
+    "next": 'tell application "Spotify" to next track',
+    "pause": 'tell application "Spotify" to pause',
+    "play": 'tell application "Spotify" to play',
+}
+# Spotify reads back one less than it was set to (set 50, get 49), so set one
+# higher to land on the number asked for; otherwise every step loses a point.
+SPOTIFY_VOLUME = """
+if application "Spotify" is not running then return
+tell application "Spotify"
+  set v to (sound volume) + ({step})
+  if v < 0 then set v to 0
+  if v > 100 then set v to 100
+  if v < 100 and v > 0 then set v to v + 1
+  set sound volume to v
+end tell
+"""
+
+
+def osascript(script):
+    done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=5)
+    if done.returncode != 0:
+        raise RuntimeError(done.stderr.strip() or "osascript failed")
+    return done.stdout.strip()
+
+
+def spotify(cmd=None, step=0):
+    """Run a transport command (or none), then report what's playing."""
+    try:
+        before = osascript(SPOTIFY_STATUS) if cmd in SPOTIFY_COMMANDS else None
+        if cmd in SPOTIFY_COMMANDS:
+            osascript(SPOTIFY_COMMANDS[cmd])
+        elif cmd == "volume":
+            osascript(SPOTIFY_VOLUME.format(step=max(-25, min(25, int(step)))))
+        out = osascript(SPOTIFY_STATUS)
+        # Spotify takes a moment to report a pause or a new song: wait (up to
+        # a second) for the status to change, so the board shows what happened.
+        what = lambda status: [line for i, line in enumerate(status.split("\n")) if i in (0, 4)]  # state, track
+        waited = 0
+        while before is not None and what(out) == what(before) and waited < 1.0:
+            time.sleep(0.15)
+            waited += 0.15
+            out = osascript(SPOTIFY_STATUS)
+    except (RuntimeError, subprocess.TimeoutExpired) as err:
+        return {"running": False, "error": str(err)}
+    if out == "off":
+        return {"running": False}
+    fields = out.split("\n") + [""] * 6
+
+    def number(text):
+        try:
+            return float(text.replace(",", "."))  # some locales write 44,27
+        except ValueError:
+            return None
+
+    duration_ms = number(fields[3])
+    return {
+        "running": True,
+        "state": fields[0],
+        "volume": int(fields[1]) if fields[1].isdigit() else None,
+        "position": number(fields[2]),  # seconds into the song
+        "duration": duration_ms / 1000 if duration_ms else None,  # seconds
+        "track": fields[4],
+        "artist": fields[5],
+    }
+
+
+def note_target(notes_root, rel):
+    """Where a note may be written: a .md path inside notes_root whose folder
+    already exists. None for anything else."""
+    if not isinstance(rel, str) or not rel.lower().endswith(".md") or "\x00" in rel:
+        return None
+    target = (notes_root / rel).resolve()
+    if notes_root not in target.parents or not target.parent.is_dir():
+        return None
+    return target
+
+
+def write_note(notes_root, rel, markdown, create):
+    target = note_target(notes_root, rel)
+    if target is None:
+        raise ValueError("notes can only be saved as .md files inside the notes folder")
+    if not isinstance(markdown, str) or len(markdown.encode("utf-8")) > MAX_NOTE_BYTES:
+        raise ValueError("note is missing or too large")
+    if create and target.exists():
+        raise FileExistsError(rel)
+    if not create and not target.is_file():
+        raise FileNotFoundError(rel)
+    tmp = target.with_name(f".{target.name}.handmedown-tmp")
+    tmp.write_text(markdown, encoding="utf-8")
+    tmp.replace(target)
+    return target.relative_to(notes_root).as_posix()
+
+
 def resolve_note(notes_root, rel):
     """Return the real path of a note, or None if it escapes notes_root."""
     if not rel or not rel.lower().endswith(".md"):
@@ -291,6 +397,8 @@ class Handler(SimpleHTTPRequestHandler):
         if url.path == "/api/config":
             titles = [a["title"] for a in self.config["actions"]]
             return self.send_json({"name": self.config["name"], "actions": titles})
+        if url.path == "/api/spotify":
+            return self.send_json(spotify())
         if url.path == "/api/notes":
             if not notes_root.is_dir():
                 return self.send_json({"folders": [], "error": "notes folder not found"})
@@ -323,9 +431,26 @@ class Handler(SimpleHTTPRequestHandler):
             if url.path == "/api/status":
                 self.board.set_status(data.get("source"), data.get("state"), data.get("label"))
                 return self.send_json({"ok": True})
+            if url.path == "/api/note":
+                rel = write_note(self.config["notes"], data.get("path"), data.get("markdown"),
+                                 create=data.get("create") is True)
+                print(f"handmedown: saved note {rel}", flush=True)
+                return self.send_json({"path": rel})
+        except FileExistsError:
+            return self.send_json({"error": "a note with that name already exists"}, HTTPStatus.CONFLICT)
+        except FileNotFoundError:
+            return self.send_json({"error": "no such note"}, HTTPStatus.NOT_FOUND)
         except ValueError as err:
             return self.send_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
 
+        if url.path == "/api/spotify":
+            cmd = data.get("cmd")
+            if cmd not in (*SPOTIFY_COMMANDS, "volume"):
+                return self.send_json({"error": "unknown spotify command"}, HTTPStatus.BAD_REQUEST)
+            step = data.get("step", 0)
+            if type(step) is not int:
+                return self.send_json({"error": "step must be a whole number"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(spotify(cmd, step))
         if url.path == "/api/run":
             index = data.get("index")
             if type(index) is not int or not 0 <= index < len(self.config["actions"]):

@@ -8,4 +8,4 @@ notes folder, so anything you write in plain `.md` shows up here.
 - **Flick** while you let go to throw it.
 - **Pinch with both hands** on one card and pull apart to resize it.
 
-Tap the ring at the bottom any time to fold everything away.
+Write your own with **+ New**: air-tap the glowing keyboard, then **Save**.

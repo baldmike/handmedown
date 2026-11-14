@@ -1,23 +1,14 @@
-// Look to choose: estimate where on screen you're looking, from the webcam.
+// Look to choose: estimate where on screen you're looking, from the webcam,
+// with MediaPipe's face landmarker. Iris position plus head pose, mapped to
+// the screen by a nine-dot calibration; accurate to a few centimetres at best,
+// so the board uses it to pick the nearest card, not to aim a cursor.
 //
-// Two modes, both built on MediaPipe's face landmarker:
-//   head  where your nose points. Steady; a one-second "look at the centre"
-//         sets your neutral pose.
-//   eyes  where your irises point, plus head pose. A nine-dot calibration fits
-//         a per-person mapping; accurate to a few centimetres at best, so the
-//         board uses it to pick the nearest card, not to aim a cursor.
-//
-// In either mode a deliberate double blink (both eyes, twice, quickly) fires
+// A deliberate double blink (both eyes, twice, quickly) fires
 // onDoubleBlink: the board taps whatever card you're looking at. While your
 // eyes are closing the look point freezes, so a blink can't move the choice.
 
 const FACE_MODEL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-
-// Head mode: screen fraction moved per unit of nose offset (offset is measured
-// in inter-eye distances, so it doesn't depend on how far you sit).
-const HEAD_GAIN_X = 1.8;
-const HEAD_GAIN_Y = 3.2;
 
 const DOT_MS = 1300;     // each calibration dot is shown this long...
 const SETTLE_MS = 450;   // ...and samples start once your eyes have landed on it
@@ -74,13 +65,20 @@ function features(lms, vw, vh) {
 
 const eyeVector = (f) => [f.gx, f.gy, f.nx, f.ny, f.fx, f.fy];
 
+// Smallest spread each eyeVector feature is scaled by when fitting. Calibration
+// asks you to hold your head still, so the head features barely vary; scaling
+// them by that tiny spread would turn landmark noise into huge inputs and fling
+// the estimate around at the slightest head movement. With these floors, a
+// feature that didn't vary during calibration just gets ~no weight.
+const MIN_SPREAD = [0.01, 0.01, 0.03, 0.03, 0.03, 0.03];
+
 // Ridge least squares on standardised features: returns a predictor.
-function fitLinear(rows, targets) {
+function fitLinear(rows, targets, minSpread = []) {
   const k = rows[0].length;
   const mean = Array(k).fill(0), std = Array(k).fill(0);
   for (const r of rows) r.forEach((v, j) => (mean[j] += v / rows.length));
   for (const r of rows) r.forEach((v, j) => (std[j] += (v - mean[j]) ** 2 / rows.length));
-  for (let j = 0; j < k; j++) std[j] = Math.sqrt(std[j]) || 1;
+  for (let j = 0; j < k; j++) std[j] = Math.max(Math.sqrt(std[j]), minSpread[j] ?? 0) || 1;
 
   const X = rows.map((r) => [1, ...r.map((v, j) => (v - mean[j]) / std[j])]);
   const n = k + 1;
@@ -123,7 +121,13 @@ export class Look {
     this.point = null;       // latest estimate, screen px (fractions × screen size)
     this.fx = null;
     this.fy = null;
-    this.models = { head: load("head"), eyes: load("eyes") };
+    // Calibration is per session: it goes stale as soon as you or the laptop
+    // move, so every start of a look mode calibrates first. Only the mode is saved.
+    this.models = { eyes: null };
+    try {
+      localStorage.removeItem(`${STORE}.head`);
+      localStorage.removeItem(`${STORE}.eyes`);
+    } catch { /* private window */ }
 
     this.overlay = document.createElement("div");
     this.overlay.id = "calib";
@@ -148,8 +152,8 @@ export class Look {
     this.point = null;
     this.marker.hidden = true;
     if (mode === "off") return this.say("look: off");
-    this.fx = new this.Filter(mode === "eyes" ? 0.35 : 0.9, mode === "eyes" ? 0.002 : 0.004);
-    this.fy = new this.Filter(mode === "eyes" ? 0.35 : 0.9, mode === "eyes" ? 0.002 : 0.004);
+    this.fx = new this.Filter(0.35, 0.002);
+    this.fy = new this.Filter(0.35, 0.002);
     if (!this.face) {
       this.say("loading face tracking…");
       const { mod, fileset } = await this.loadVision();
@@ -161,22 +165,18 @@ export class Look {
       });
     }
     if (this.mode !== mode) return; // switched again while loading
-    if (this.models[mode]) this.say(`look: ${mode} (k to recalibrate)`);
-    else this.calibrate();
+    this.models[mode] = null;
+    this.calibrate();
   }
 
   calibrate() {
     if (!this.active) return;
-    const spots = this.mode === "eyes"
-      ? [0.1, 0.5, 0.9].flatMap((y) => [0.1, 0.5, 0.9].map((x) => ({ x, y })))
-      : [{ x: 0.5, y: 0.5 }];
-    // Visit the eye dots in a snake so the eyes never jump across the screen.
-    if (spots.length === 9) [spots[3], spots[5]] = [spots[5], spots[3]];
+    const spots = [0.1, 0.5, 0.9].flatMap((y) => [0.1, 0.5, 0.9].map((x) => ({ x, y })));
+    // Visit the dots in a snake so the eyes never jump across the screen.
+    [spots[3], spots[5]] = [spots[5], spots[3]];
     this.calib = { spots, index: 0, start: null, samples: [] };
     this.overlay.hidden = false;
-    this.hintEl.textContent = this.mode === "eyes"
-      ? "Keep your head still and follow the dot with your eyes"
-      : "Point your nose at the dot";
+    this.hintEl.textContent = "Keep your head still and follow the dot with your eyes";
     this.placeDot();
   }
 
@@ -208,20 +208,21 @@ export class Look {
     if (c.samples.length < c.spots.length * 5) {
       return this.say("calibration lost your face: press k to try again");
     }
-    if (this.mode === "head") {
-      const n = c.samples.length;
-      this.models.head = {
-        nx: c.samples.reduce((s, x) => s + x.f.nx, 0) / n,
-        ny: c.samples.reduce((s, x) => s + x.f.ny, 0) / n,
-      };
-    } else {
-      this.models.eyes = fitLinear(
-        c.samples.map((s) => eyeVector(s.f)),
-        c.samples.map((s) => [s.spot.x, s.spot.y]),
-      );
-    }
-    save(this.mode, this.models[this.mode]);
-    this.say(`look: ${this.mode} calibrated`);
+    // Fit, drop the worst-fitting fifth of samples (glare on glasses, a glance
+    // away), and fit again on the rest.
+    const fit = (samples) => fitLinear(
+      samples.map((s) => eyeVector(s.f)),
+      samples.map((s) => [s.spot.x, s.spot.y]),
+      MIN_SPREAD,
+    );
+    const first = fit(c.samples);
+    const err = (s) => {
+      const p = predict(first, eyeVector(s.f));
+      return Math.hypot(p.x - s.spot.x, p.y - s.spot.y);
+    };
+    const kept = [...c.samples].sort((a, b) => err(a) - err(b)).slice(0, Math.ceil(c.samples.length * 0.8));
+    this.models[this.mode] = fit(kept);
+    this.say(`look: ${this.mode} calibrated (k to redo)`);
   }
 
   // Track both eyelids; a short closure is a blink, two in a row a double blink.
@@ -259,6 +260,7 @@ export class Look {
     const lms = result.faceLandmarks?.[0];
     const f = lms && lms.length > 473 ? features(lms, this.video.videoWidth, this.video.videoHeight) : null;
     if (f) this.stepBlink(result.faceBlendshapes?.[0]?.categories, now);
+    this.features = f;
     const busy = this.eyesBusy(now);
 
     if (this.calib) {
@@ -273,19 +275,22 @@ export class Look {
       return (this.point = null);
     }
 
-    let frac;
-    if (this.mode === "head") {
-      // Turning to your right moves the nose image-left; the board is mirrored.
-      frac = { x: 0.5 - (f.nx - model.nx) * HEAD_GAIN_X, y: 0.5 + (f.ny - model.ny) * HEAD_GAIN_Y };
-    } else {
-      frac = predict(model, eyeVector(f));
-    }
+    const frac = predict(model, eyeVector(f));
     const x = this.fx.filter(Math.min(1, Math.max(0, frac.x)) * innerWidth, now);
     const y = this.fy.filter(Math.min(1, Math.max(0, frac.y)) * innerHeight, now);
     this.point = { x, y };
     this.marker.hidden = false;
     this.marker.style.transform = `translate(${x}px, ${y}px)`;
     return this.point;
+  }
+
+  // One line for ?debug=1: what the face tracker is reading right now.
+  debugText() {
+    const f = this.features;
+    if (!f) return `look ${this.mode}: no face`;
+    const pt = this.point ? ` → ${Math.round(this.point.x)},${Math.round(this.point.y)}` : "";
+    return `look ${this.mode}: nose ${f.nx.toFixed(2)},${f.ny.toFixed(2)} iris ${f.gx.toFixed(2)},${f.gy.toFixed(2)}` +
+      ` blink ${this.blinkScore.toFixed(2)}${this.calib ? " (calibrating)" : this.models[this.mode] ? "" : " (not calibrated)"}${pt}`;
   }
 
   pause() {
@@ -296,6 +301,6 @@ export class Look {
 
   static savedMode() {
     const m = load("mode");
-    return ["off", "head", "eyes"].includes(m) ? m : "off";
+    return m === "eyes" ? m : "off";
   }
 }

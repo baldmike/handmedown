@@ -11,4 +11,4 @@ folder of markdown files. An Obsidian vault works as-is.
 }
 ```
 
-Each folder becomes a card off the ring, and each note fans out of its folder.
+The Notes app lists every note by folder, and saves new ones back into it.

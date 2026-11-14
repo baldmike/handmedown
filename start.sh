@@ -27,6 +27,28 @@ fi
 # A separate Chrome profile gives the board its own app window (and Dock icon),
 # and makes Chrome honour the window flags even when Chrome is already open.
 flags="--app=$url --user-data-dir=$HOME/.handmedown/chrome --no-first-run --no-default-browser-check"
+
+# The board belongs on the laptop's own screen, next to the laptop camera that
+# tracks your hands, even with a bigger monitor attached. macOS measures
+# screens from the bottom-left of the main one; Chrome wants top-left.
+laptop=$(osascript -l JavaScript -e '
+  ObjC.import("AppKit");
+  const all = $.NSScreen.screens, mainH = all.objectAtIndex(0).frame.size.height;
+  let out = "";
+  for (let i = 0; i < all.count; i++) {
+    const s = all.objectAtIndex(i);
+    if (!/built-in/i.test(s.localizedName.js)) continue;
+    const f = s.visibleFrame;
+    out = [f.origin.x, mainH - f.origin.y - f.size.height, f.size.width, f.size.height].map(Math.round).join(" ");
+  }
+  out' 2>/dev/null)
+if [ -n "$laptop" ]; then
+  read -r lx ly lw lh <<EOF
+$laptop
+EOF
+  flags="$flags --window-position=$lx,$ly --window-size=$lw,$lh"
+fi
 [ "$1" = "--fullscreen" ] && flags="$flags --start-fullscreen"
+echo "handmedown: opening the board${laptop:+ on the laptop screen}"
 # shellcheck disable=SC2086
 open -na "Google Chrome" --args $flags

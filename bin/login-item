@@ -1,0 +1,60 @@
+#!/bin/sh
+# Start the handmedown server at login, so the installed app always has
+# something to talk to.
+#
+#   bin/login-item install   start now and at every login (restarts if it dies)
+#   bin/login-item remove    stop it and stop starting it at login
+#   bin/login-item status    is it loaded?
+#
+# It's a launchd agent in ~/Library/LaunchAgents. Logs go to state/server.log.
+cd "$(dirname "$0")/.." || exit 1
+root=$(pwd)
+label=com.handmedown.server
+plist="$HOME/Library/LaunchAgents/$label.plist"
+domain="gui/$(id -u)"
+
+case "$1" in
+  install)
+    python=$(command -v python3) || { echo "login-item: python3 not found" >&2; exit 1; }
+    mkdir -p "$HOME/Library/LaunchAgents" state
+    launchctl bootout "$domain/$label" 2>/dev/null
+    cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$python</string>
+    <string>-u</string>
+    <string>$root/server.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>$root</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$root/state/server.log</string>
+  <key>StandardErrorPath</key><string>$root/state/server.log</string>
+</dict>
+</plist>
+EOF
+    launchctl bootstrap "$domain" "$plist" && echo "login-item: installed; the server starts at login (log: state/server.log)"
+    ;;
+  remove)
+    launchctl bootout "$domain/$label" 2>/dev/null
+    rm -f "$plist"
+    echo "login-item: removed"
+    ;;
+  status)
+    if launchctl print "$domain/$label" >/dev/null 2>&1; then
+      launchctl print "$domain/$label" | grep -E '^\s*(state|pid|last exit code) ='
+    else
+      echo "login-item: not installed"
+    fi
+    ;;
+  *)
+    sed -n 2,9p "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac
