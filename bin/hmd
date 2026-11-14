@@ -4,6 +4,8 @@
     hmd push "Title" ["markdown body" | -] [--id ID] [--tone info|ok|warn|error|ask]
     hmd remove ID | --all
     hmd status working|waiting|done|idle|off ["label"] [--source NAME]
+    hmd timer 5 ["label"]     start a 5-minute timer (also 90s, 1h, 1:30)
+    hmd timer --list          the timers, and what's left on each
     hmd board                 print what's on the board (JSON)
     hmd hook                  Claude Code hook: reads the event JSON on stdin
 
@@ -109,6 +111,43 @@ def hook():
     return 0
 
 
+# ---------------------------------------------------------------- timers
+
+def parse_duration(text):
+    """5 -> 300 (minutes by default), 90s, 1h, 2m, 1:30 (m:ss) -> seconds."""
+    text = text.strip().lower()
+    try:
+        if ":" in text:
+            minutes, seconds = text.split(":", 1)
+            return int(minutes) * 60 + int(seconds)
+        unit = {"s": 1, "m": 60, "h": 3600}.get(text[-1:])
+        return round(float(text[:-1] if unit else text) * (unit or 60))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a duration: {text!r} (try 5, 90s, 1h or 1:30)")
+
+
+def clock(seconds):
+    t = max(0, int(seconds + 0.999))
+    h, m, s = t // 3600, t % 3600 // 60, t % 60
+    return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
+
+
+def list_timers():
+    board = call("/api/board")
+    now = board.get("now", 0)
+    timers = board.get("timers", [])
+    if not timers:
+        print("no timers")
+    for t in timers:
+        if t["state"] == "running":
+            left = clock(t["end"] - now)
+        elif t["state"] == "paused":
+            left = f"{clock(t['left'])} (paused)"
+        else:
+            left = f"done +{clock(now - t['end'])}"
+        print(f"{t['id']}  {t['label'] or clock(t['seconds']) + ' timer':<24} {left}")
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
@@ -129,6 +168,11 @@ def main():
     status.add_argument("state", choices=["idle", "working", "waiting", "done", "off"])
     status.add_argument("label", nargs="?", default="")
     status.add_argument("--source", default="default")
+
+    timer = sub.add_parser("timer", help="start a kitchen timer, or list them")
+    timer.add_argument("duration", nargs="?", type=parse_duration, help="5 (minutes), 90s, 1h or 1:30")
+    timer.add_argument("label", nargs="?", default="")
+    timer.add_argument("--list", action="store_true")
 
     sub.add_parser("board", help="print the board as JSON")
     sub.add_parser("hook", help="Claude Code hook entry point (event JSON on stdin)")
@@ -152,6 +196,13 @@ def main():
                 return 1
         elif args.cmd == "status":
             call("/api/status", {"source": args.source, "state": args.state, "label": args.label})
+        elif args.cmd == "timer":
+            if args.list:
+                list_timers()
+            elif args.duration is None:
+                parser.error("timer needs a duration, or --list")
+            else:
+                print(call("/api/timer", {"op": "add", "seconds": args.duration, "label": args.label})["id"])
         elif args.cmd == "board":
             print(json.dumps(call("/api/board"), indent=2))
     except urllib.error.HTTPError as err:

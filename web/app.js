@@ -6,9 +6,8 @@
 
 import { renderMarkdown } from "./markdown.js";
 import { Look } from "./look.js";
-import { Calculator, calculatorHtml } from "./calculator.js";
-import { NotesApp, notesHtml } from "./notes.js";
 import { SpotifyApp, spotifyHtml } from "./spotify.js";
+import { Timers, timersHtml } from "./timers.js";
 
 const MEDIAPIPE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const HAND_MODEL =
@@ -29,32 +28,35 @@ const SCROLL_SPEED = 900;   // px/s when two fingers point straight up or down
 const SCROLL_DEADZONE = 0.45; // fingers flatter than this (0 flat .. 1 vertical) don't scroll
 const SCROLL_SETTLE = 3;    // frames the two-finger pose must hold before scrolling
 const FLICK_SPEED = 1300;   // px/s: a two-finger swipe this fast over a message dismisses it
-const VOLUME_VERTICAL = 0.75; // a pointing finger this upright (0 flat .. 1 straight) changes Spotify's volume
-const VOLUME_SETTLE_MS = 300; // ...once held this long
-const VOLUME_EVERY_MS = 300;  // ...then a step this often
+const VOLUME_VERTICAL = 0.85; // a pointing finger this upright (0 flat .. 1 straight) changes Spotify's volume
+const VOLUME_SETTLE_MS = 800; // ...once held this long
+const VOLUME_EVERY_MS = 400;  // ...then a step this often
 const VOLUME_STEP = 5;
 // Spotify hand signs, held still this long: thumbs down for the next song,
 // palm to the camera to pause.
-const POSE_HOLD_MS = { "thumbs-down": 400, palm: 800 };
+const POSE_HOLD_MS = { "thumbs-down": 1000, palm: 1500 };
 const POSE_GRACE_MS = 150;    // a sign missed for a frame or two still counts as held
 // Swipes (open hand, sideways): left for the previous song, right for the next.
-const SWIPE_SPEED = 900;      // px/s: a stroke's top speed must reach this...
-const SWIPE_MIN_FRAC = 0.12;  // ...and it must cover this share of the screen width
+const SWIPE_SPEED = 1400;     // px/s: a stroke's top speed must reach this...
+const SWIPE_MIN_FRAC = 0.25;  // ...and it must cover this share of the screen width
 const SWIPE_MOVING = 250;     // px/s sideways: slower than this, a stroke has ended
 const SWIPE_SETTLE_MS = 250;  // after a stroke, wait this long for a faster one the other way (the real swipe after a wind-up)
-const SWIPE_COOLDOWN_MS = 700; // one song per swipe, even as the hand swings back
+const SWIPE_COOLDOWN_MS = 1500; // one song per swipe, even as the hand swings back
 const PALM_AFTER_SWIPE_MS = 2000; // a hand coming to rest open after a swipe isn't a pause
-const PALM_STILL_PX_S = 450;  // the palm must be this still (at the knuckles): a hand moving the cursor isn't a stop sign
+const PALM_STILL_PX_S = 300;  // the palm must be this still (at the knuckles): a hand moving the cursor isn't a stop sign
 const TAP_DIP = 0.82;       // air tap: fingertip reach drops below this share of its usual...
 const TAP_BACK = 0.92;     // ...and returns above this share...
 const TAP_WINDOW_MS = 450; // ...within this long
 const AIM_LAG_MS = 120;    // a tap presses the key aimed at this long before the dip
 const POINT_HOLD_MS = 500; // stay in pointing mode through a tap's brief finger bend
+const PALM_DISMISS_MS = 500; // a palm held this long stops a ringing timer
+const COUNT_STILL_PX_S = 500; // hands moving faster than this aren't holding up a count
 const MIN_SCALE = 0.4;
 const MAX_SCALE = 3;
 
 const params = new URLSearchParams(location.search);
 const DEBUG = params.get("debug") === "1";
+const FAST = params.get("fast") === "1"; // timers: minutes run as seconds, for testing
 
 const video = document.getElementById("camera");
 const debugCanvas = document.getElementById("debug");
@@ -237,9 +239,9 @@ function flickStep(p, point) {
 // straight down for volume down: a step every VOLUME_EVERY_MS while you hold
 // it. Not while aiming at a button, so pointing to air-tap a key still works.
 function volumeStep(p, pointing, dir, now) {
-  const sp = windows.get("spotify");
+  const sp = spotifyLive();
   const upright = pointing && dir !== null && Math.abs(dir) > VOLUME_VERTICAL && !p.hot && !p.pinching;
-  const want = sp && !sp.removing && upright ? (dir < 0 ? 1 : -1) : 0;
+  const want = sp && upright ? (dir < 0 ? 1 : -1) : 0;
   if (want !== p.volDir) {
     p.volDir = want;
     p.volSince = now;
@@ -252,9 +254,10 @@ function volumeStep(p, pointing, dir, now) {
   sp.data.instance.volume(want * VOLUME_STEP);
 }
 
-// Hold a hand sign while the Spotify window is open: thumbs down skips to the
+// Hold a hand sign while Spotify is the app in use: thumbs down skips to the
 // next song, a still palm to the camera pauses. Each fires once per sign;
-// drop your hand (or change the sign) to do it again.
+// drop your hand (or change the sign) to do it again. While a timer is
+// ringing, a palm stops it instead, and nothing else.
 function poseStep(p, pose, now) {
   if (pose) p.poseSeen = now;
   else if (p.pose && now - p.poseSeen < POSE_GRACE_MS) pose = p.pose;
@@ -263,8 +266,15 @@ function poseStep(p, pose, now) {
     p.poseSince = now;
     p.poseFired = false;
   }
-  const sp = windows.get("spotify");
-  const live = pose && sp && !sp.removing && !p.poseFired;
+  if (timers.ringing) {
+    if (pose === "palm" && !p.poseFired && now - p.poseSince >= PALM_DISMISS_MS) {
+      p.poseFired = true;
+      timers.dismissAll();
+    }
+    return;
+  }
+  const sp = spotifyLive();
+  const live = pose && sp && !p.poseFired;
   p.el.classList.toggle("sign-next", !!live && pose === "thumbs-down");
   p.el.classList.toggle("sign-pause", !!live && pose === "palm");
   if (!live) return;
@@ -291,8 +301,8 @@ function poseStep(p, pose, now) {
 // (swipeEnd runs when the hand is lost).
 function swipeStep(p, openHand, now) {
   if (openHand) p.openSeen = now;
-  const sp = windows.get("spotify");
-  if (!sp || sp.removing || p.card || p.pinching) {
+  const sp = spotifyLive();
+  if (!sp || p.card || p.pinching) {
     p.stroke = p.swipe = null;
     return;
   }
@@ -329,8 +339,8 @@ function strokeDone(p, st, now) {
 function fireSwipe(p, now) {
   const c = p.swipe;
   p.swipe = null;
-  const sp = windows.get("spotify");
-  if (!c || !sp || sp.removing || now - (p.swipeAt ?? -Infinity) < SWIPE_COOLDOWN_MS) return;
+  const sp = spotifyLive();
+  if (!c || !sp || now - (p.swipeAt ?? -Infinity) < SWIPE_COOLDOWN_MS) return;
   p.swipeAt = now;
   sp.data.instance.gesture(c.dir < 0 ? "prev" : "next", "swipe");
 }
@@ -374,8 +384,9 @@ function scrollStep(p, point, now) {
 // `anchor` is the point used to tell a tap from a drag. For a hand it's the
 // palm: opening the fingers to release a pinch moves the fingertips but not
 // the palm, so a quick pinch still reads as a tap.
-function updatePointer(id, rawX, rawY, pinching, now, { smooth = true, anchor = null, scrollPoint = null, pointing = false, pointDir = null, pose = null, openHand = false, tap = null } = {}) {
+function updatePointer(id, rawX, rawY, pinching, now, { smooth = true, anchor = null, scrollPoint = null, pointing = false, pointDir = null, pose = null, openHand = false, tap = null, fingers = 0 } = {}) {
   const p = getPointer(id);
+  p.fingers = fingers;
   const x = smooth ? p.fx.filter(rawX, now) : rawX;
   const y = smooth ? p.fy.filter(rawY, now) : rawY;
   // The anchor is the hand itself (the middle knuckle), smoothed like the
@@ -457,11 +468,22 @@ function pinchDown(p, now) {
   p.downY = p.ay;
   p.travel = 0;
   setHover(p, null);
+  // A ringing timer: any pinch, anywhere, stops it, and does nothing else.
+  if (timers.dismissAll()) {
+    p.dismissed = true;
+    return;
+  }
+  p.dismissed = false;
+  if (document.elementFromPoint(p.x, p.y)?.closest("#timer-strip")) {
+    p.stripTap = true;
+    return;
+  }
   const card = cardAt(p.x, p.y) ?? (p.id !== "mouse" ? gazeCard : null);
   if (!card) {
     if (p.id !== "mouse") say("pinch: no card under your fingers");
     return;
   }
+  if (card.kind === "window") focusApp(card.data.app);
   if (card.fixed) {
     // Pinned (the Spotify display): hands can't pick it up, move, throw or
     // stretch it. Only a quick pinch on its ✕ does anything.
@@ -494,6 +516,15 @@ function pinchDown(p, now) {
 
 function pinchUp(p, now, lost) {
   p.pinching = false;
+  if (p.dismissed) {
+    p.dismissed = false;
+    return;
+  }
+  if (p.stripTap) {
+    p.stripTap = false;
+    if (!lost && now - p.downAt < TAP_MS && p.travel < TAP_PX) openApp({ data: { app: "timers" }, x: innerWidth / 2, y: 40 });
+    return;
+  }
   if (p.fixedClose) {
     const { card, key } = p.fixedClose;
     p.fixedClose = null;
@@ -570,7 +601,7 @@ function placeLaunchers() {
     kind: "launcher",
     html: '<div class="title">apps</div>',
     x: innerWidth / 2,
-    y: innerHeight * 0.7,
+    y: innerHeight * 0.88, // low, clear of the Timers window
     data: { menu: "apps" },
   }));
 }
@@ -625,13 +656,26 @@ function openLauncher(card) {
 // Built-in apps open as windows on the board. Each is an object with
 // press(key); the board turns taps on its [data-key] buttons into presses.
 const APPS = {
-  notes: { title: "Notes", html: notesHtml, y: 0.5, create: (el) => new NotesApp(el, { api, say }) },
-  calculator: { title: "Calculator", html: calculatorHtml, y: 0.45, create: (el) => new Calculator(el) },
+  timers: { title: "Timers", html: timersHtml, y: 0.42, create: (el) => timers.attach(el) },
   // Pinned to the left, clear of the apps ring (centre) and pushed cards (right).
   spotify: { title: "Spotify", html: spotifyHtml, x: 0.25, y: 0.47, fixed: true, create: (el) => new SpotifyApp(el, { api, say }) },
 };
 const windows = new Map(); // app name -> its open window card
 const OPEN_APPS_STORE = "handmedown.openApps";
+
+// Hand signs go to one app at a time: the one you last opened or touched.
+// So holding up fingers for a timer can't pause Spotify, and the other way round.
+let focusedApp = null;
+
+function focusApp(name) {
+  focusedApp = name;
+  for (const [n, card] of windows) card.el.classList.toggle("focused", n === name && !card.removing);
+}
+
+function spotifyLive() {
+  const sp = windows.get("spotify");
+  return sp && !sp.removing && focusedApp === "spotify" ? sp : null;
+}
 
 // Which app windows are open, kept so a reload (or restart) brings them back.
 function saveOpenApps() {
@@ -640,8 +684,9 @@ function saveOpenApps() {
 }
 
 function reopenApps() {
-  let names = [];
-  try { names = JSON.parse(localStorage.getItem(OPEN_APPS_STORE)) || []; } catch { /* none */ }
+  let names = null;
+  try { names = JSON.parse(localStorage.getItem(OPEN_APPS_STORE)); } catch { /* none */ }
+  if (!Array.isArray(names)) names = ["timers"]; // first run: open Timers
   const from = launchers[0];
   for (const name of names) if (APPS[name]) openApp({ data: { app: name }, x: from.x, y: from.y });
 }
@@ -653,6 +698,7 @@ function openApp(from) {
     // Already open: bring it back to the middle.
     open.target = { x: innerWidth * (spec.x ?? 0.5), y: innerHeight * spec.y };
     raise(open);
+    focusApp(name);
     return;
   }
   const card = spawnCard({
@@ -667,22 +713,18 @@ function openApp(from) {
   card.fixed = !!spec.fixed;
   card.data.instance = spec.create(card.el);
   windows.set(name, card);
+  focusApp(name);
   saveOpenApps();
 }
 
 function pressWindow(card, key) {
+  focusApp(card.data.app);
   if (!key) return;
   key.classList.remove("pressed");
   void key.offsetWidth; // restart the flash
   key.classList.add("pressed");
   if (key.dataset.key === "close") removeCard(card);
   else card.data.instance.press(key.dataset.key);
-}
-
-// The app window currently taking typing, if any.
-function typingWindow() {
-  for (const card of windows.values()) if (!card.removing && card.data.instance.editing) return card;
-  return null;
 }
 
 async function runAction(card) {
@@ -733,7 +775,8 @@ function messageSpot() {
   };
 }
 
-function applyBoard({ cards: list, sessions }) {
+function applyBoard({ cards: list, sessions, timers: timerList, now: serverNow }) {
+  timers.set(timerList, serverNow);
   const live = new Set();
   for (const msg of list) {
     live.add(msg.id);
@@ -815,6 +858,7 @@ addEventListener("pointermove", (e) => {
   updatePointer("mouse", e.clientX, e.clientY, (e.buttons & 1) === 1, performance.now(), { smooth: false });
 });
 addEventListener("pointerdown", (e) => {
+  timers.unlock(); // a real click: the page may make sound now
   if (e.pointerType !== "mouse" || e.button !== 0) return;
   e.preventDefault();
   updatePointer("mouse", e.clientX, e.clientY, true, performance.now(), { smooth: false });
@@ -832,8 +876,8 @@ addEventListener("wheel", (e) => {
   card.scale = clamp(card.scale * Math.exp(-e.deltaY * 0.002), MIN_SCALE, MAX_SCALE);
 }, { passive: false });
 addEventListener("keydown", (e) => {
-  // While you're writing a note, the keyboard types into it.
-  if (typingWindow()?.data.instance.handleKey(e)) return;
+  timers.unlock();
+  if (timers.dismissAll()) return; // any key stops a ringing timer
   if (e.key === "Escape" || e.key === "c") {
     look.cancelCalibration();
     clearBoard();
@@ -907,6 +951,7 @@ function pinchGate(id, ratio, now) {
 // ---------------------------------------------------------------- look to choose
 
 const look = new Look({ loadVision, video, say, Filter: OneEuro, onDoubleBlink });
+const timers = new Timers({ api, say, fast: FAST });
 let gazeCard = null;
 
 // Double blink: tap the card you're looking at, hands-free.
@@ -1035,6 +1080,12 @@ function trackHands(now) {
     else if (!pinching && out(8, 6) && out(12, 10) && out(16, 14) && out(20, 18) && fingersUp > 0.6) pose = "palm";
     if (DEBUG && pose && now > sayUntil) statusEl.textContent = `sign: ${pose}`;
     const openHand = !pinching && out(8, 6) && out(12, 10) && out(16, 14) && out(20, 18);
+    // Fingers held up, for setting a timer. The thumb counts when it's well
+    // clear of the hand (a thumbs-up is 1). A lone index finger is pointing,
+    // which aims and air-taps, so it counts as nothing.
+    const thumbUp = thumbOut > 0.75 && (t2y - ty) / Math.max(dist(t2x, t2y, tx, ty), 1) > 0.3;
+    const fingers = pinching || pointing ? 0
+      : [out(8, 6), out(12, 10), out(16, 14), out(20, 18), thumbUp].filter(Boolean).length;
 
     // Which way those two fingers point: knuckle-to-tip, vertical share.
     let scrollPoint = null;
@@ -1047,8 +1098,9 @@ function trackHands(now) {
 
     // Pinch cursor sits between thumb and index; a pointing cursor on the fingertip.
     const c = pointing ? toScreen(lms[8]) : toScreen({ x: (lms[4].x + lms[8].x) / 2, y: (lms[4].y + lms[8].y) / 2 });
-    updatePointer(id, c.x, c.y, pinching, now, { anchor: toScreen(lms[9]), scrollPoint, pointing, pointDir, pose, openHand, tap });
+    updatePointer(id, c.x, c.y, pinching, now, { anchor: toScreen(lms[9]), scrollPoint, pointing, pointDir, pose, openHand, tap, fingers });
   });
+  countFingers(now);
 
   for (const p of [...pointers.values()]) {
     if (p.id !== "mouse" && now - p.seen > LOST_MS) dropPointer(p, now);
@@ -1056,6 +1108,19 @@ function trackHands(now) {
   const hands = [...pointers.keys()].filter((k) => k !== "mouse").length;
   if (now > sayUntil && !(DEBUG && (hands || look.active))) statusEl.textContent = hands ? `${hands} hand${hands > 1 ? "s" : ""}` : "show a hand";
   if (DEBUG) drawDebug(result.landmarks);
+}
+
+// Every hand's fingers, added up, for the Timers window when it's the app in use.
+function countFingers(now) {
+  const hands = [...pointers.values()].filter((p) => p.id !== "mouse");
+  if (focusedApp !== "timers") return timers.count(null, false, now);
+  let total = 0, steady = true;
+  for (const p of hands) {
+    total += p.fingers || 0;
+    const a = p.hist[0], b = p.hist[p.hist.length - 1];
+    if (a && b && b.t > a.t && dist(a.ax, a.ay, b.ax, b.ay) / ((b.t - a.t) / 1000) > COUNT_STILL_PX_S) steady = false;
+  }
+  timers.count(total, steady, now);
 }
 
 function drawDebug(hands) {
@@ -1152,6 +1217,7 @@ function frame(now) {
   lastFrame = now;
   trackHands(now);
   stepCards(dt);
+  timers.frame(now);
   requestAnimationFrame(frame);
 }
 

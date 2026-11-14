@@ -109,28 +109,6 @@ html, body {
 .app-head .title { color: #cfeaff; text-shadow: 0 0 8px rgba(46, 168, 255, 0.7); }
 .app-actions { display: flex; gap: 8px; align-items: center; }
 
-/* ---- calculator ---- */
-.card.calculator { width: 316px; }
-.calc-screen {
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  border-radius: 12px;
-  background: rgba(0, 8, 20, 0.7);
-  border: 1px solid rgba(46, 168, 255, 0.35);
-  box-shadow: inset 0 0 18px rgba(46, 168, 255, 0.25);
-  text-align: right;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  overflow: hidden;
-}
-.calc-expr { min-height: 1.3em; font-size: 13px; color: rgba(160, 215, 255, 0.7); white-space: nowrap; }
-.calc-value {
-  font-size: 40px;
-  line-height: 1.15;
-  color: #e6f6ff;
-  text-shadow: 0 0 6px #2ea8ff, 0 0 18px #2ea8ff, 0 0 36px rgba(46, 168, 255, 0.6);
-  white-space: nowrap;
-}
-.calc-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .card button {
   font: inherit;
   color: inherit;
@@ -138,7 +116,7 @@ html, body {
   outline: none;
   -webkit-tap-highlight-color: transparent;
 }
-.calc-keys button,
+.card.window button,
 .app-close {
   height: 58px;
   border-radius: 14px;
@@ -150,17 +128,15 @@ html, body {
   text-shadow: 0 0 8px #2ea8ff;
   transition: background 120ms, box-shadow 120ms, transform 120ms;
 }
-.calc-keys button.op { color: #9fdcff; background: rgba(30, 100, 180, 0.4); }
-.calc-keys button.eq { background: rgba(46, 168, 255, 0.55); color: #fff; }
 .app-close { width: 32px; height: 32px; font-size: 14px; border-radius: 50%; padding: 0; }
 /* the button under your fingers */
-.calc-keys button.hot,
+.card.window button.hot,
 .app-close.hot {
   background: rgba(46, 168, 255, 0.45);
   box-shadow: 0 0 0 2px #9fdcff, 0 0 22px 4px rgba(46, 168, 255, 0.85), inset 0 0 16px rgba(160, 220, 255, 0.5);
   transform: scale(1.06);
 }
-.calc-keys button.pressed,
+.card.window button.pressed,
 .app-close.pressed { animation: key-flash 320ms ease-out; }
 @keyframes key-flash {
   from {
@@ -415,105 +391,6 @@ html, body {
   }
 }
 
-/* ---- notes app ---- */
-.card.notes { width: min(760px, 92vw); }
-.notes-app {
-  display: grid;
-  grid-template-columns: 210px 1fr;
-  gap: 12px;
-  height: min(52vh, 460px);
-}
-.card.notes.editing .notes-app { height: min(30vh, 260px); }
-.notes-list, .notes-view, .notes-editor {
-  overflow: auto;
-  border-radius: 12px;
-  background: rgba(0, 8, 20, 0.55);
-  border: 1px solid rgba(46, 168, 255, 0.3);
-}
-.notes-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.notes-folder {
-  margin: 6px 4px 0;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: rgba(160, 215, 255, 0.65);
-}
-.notes-item {
-  min-height: 44px;
-  padding: 0 12px;
-  text-align: left;
-  border-radius: 10px;
-  color: #dff4ff;
-  background: rgba(20, 70, 130, 0.25);
-  border: 1px solid rgba(46, 168, 255, 0.4);
-  flex-shrink: 0;
-}
-.notes-item.selected {
-  background: rgba(46, 168, 255, 0.4);
-  border-color: var(--grab);
-  box-shadow: 0 0 12px rgba(46, 168, 255, 0.6);
-}
-.notes-view, .notes-editor { padding: 12px 16px; user-select: text; }
-.notes-view { max-height: none; }
-.notes-empty { color: rgba(160, 215, 255, 0.6); }
-.notes-editor {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 14px;
-  color: #e6f6ff;
-}
-.notes-editor .caret {
-  display: inline-block;
-  width: 2px;
-  height: 1.15em;
-  margin-left: 1px;
-  vertical-align: text-bottom;
-  background: var(--grab);
-  box-shadow: 0 0 6px var(--grab);
-  animation: caret-blink 1s steps(1) infinite;
-}
-@keyframes caret-blink { 50% { opacity: 0; } }
-
-.app-btn {
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 10px;
-  font-size: 14px;
-  color: #dff4ff;
-  background: rgba(20, 70, 130, 0.35);
-  border: 1.5px solid var(--grab);
-  box-shadow: 0 0 8px rgba(46, 168, 255, 0.5);
-}
-.app-btn.primary { background: rgba(46, 168, 255, 0.55); color: #fff; }
-
-/* the on-board keyboard */
-.notes-keyboard { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.kb-row { display: flex; gap: 7px; }
-.kb-row button {
-  flex: 1;
-  height: 52px;
-  border-radius: 12px;
-  font-size: 20px;
-  color: #dff4ff;
-  background: rgba(20, 70, 130, 0.35);
-  border: 1.5px solid var(--grab);
-  box-shadow: 0 0 9px rgba(46, 168, 255, 0.5), inset 0 0 10px rgba(46, 168, 255, 0.2);
-  text-shadow: 0 0 8px #2ea8ff;
-  transition: background 120ms, box-shadow 120ms, transform 120ms;
-}
-.kb-row button.wide { flex: 1.5; font-size: 18px; }
-.kb-row button.space { flex: 4; font-size: 15px; }
-.kb-row button.on { background: rgba(46, 168, 255, 0.6); color: #fff; }
-
-/* the button under your fingers, and the flash when pressed: every window */
-.card.window button.hot {
-  background: rgba(46, 168, 255, 0.45);
-  box-shadow: 0 0 0 2px #9fdcff, 0 0 22px 4px rgba(46, 168, 255, 0.85), inset 0 0 16px rgba(160, 220, 255, 0.5);
-  transform: scale(1.06);
-}
-.card.window button.pressed { animation: key-flash 320ms ease-out; }
-
 /* ---- spotify ---- */
 /* Twice the size of the other windows: read and hit from across the room.
    zoom (not a transform) so hit-testing a button matches what you see, on an
@@ -576,3 +453,108 @@ html, body {
 .card.spotify.sp-vol-up .sp-vol-bar, .card.spotify.sp-vol-down .sp-vol-bar { animation: vol-flash 400ms ease-out; }
 @keyframes vol-flash { from { box-shadow: 0 0 0 2px #1ed760, 0 0 18px rgba(30, 215, 96, 0.9); } }
 .card.spotify.sp-off .sp-ind { opacity: 0.4; }
+
+/* ---- timers ---- */
+.card.window.focused { border-color: rgba(120, 200, 255, 0.85); }
+.card.timers { width: min(620px, 92vw); }
+.tm-presets { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.tm-presets button { height: 78px; font-size: 30px; font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; }
+.tm-presets small { font-size: 12px; font-weight: 500; opacity: 0.7; margin-top: 4px; }
+.tm-count { margin: 12px 2px 6px; }
+.tm-count-text { font-size: 14px; color: var(--ink-dim); }
+.card.timers.counting .tm-count-text { font-size: 26px; font-weight: 700; color: #ffd27a; }
+.tm-count-bar { height: 6px; margin-top: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.tm-count-fill { height: 100%; width: 0; background: #ffd27a; transition: width 80ms linear; }
+.tm-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.tm-empty { color: var(--ink-dim); text-align: center; padding: 14px; }
+.tm-timer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "label buttons" "digits buttons";
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(0, 8, 20, 0.6);
+  border: 1px solid rgba(46, 168, 255, 0.35);
+}
+.tm-label { grid-area: label; font-size: 14px; color: var(--ink-dim); }
+.tm-digits {
+  grid-area: digits;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 64px;
+  line-height: 1;
+  color: #e6f6ff;
+  text-shadow: 0 0 8px #2ea8ff, 0 0 24px rgba(46, 168, 255, 0.6);
+}
+.tm-timer.state-paused .tm-digits { color: #9fb3c4; text-shadow: none; animation: pulse 1.2s ease-in-out infinite alternate; }
+.tm-timer.state-ringing { border-color: #ff6a3d; }
+.tm-timer.state-ringing .tm-digits { color: #ffb08f; text-shadow: 0 0 12px #ff6a3d; }
+.tm-buttons { grid-area: buttons; display: flex; gap: 8px; }
+.tm-buttons button { width: 62px; height: 62px; font-size: 20px; }
+.tm-buttons .tm-cancel { color: #ffb4a6; }
+
+#timer-strip {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 100000;
+}
+#timer-strip[hidden] { display: none; }
+.ts-item {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(6, 14, 28, 0.75);
+  border: 1px solid rgba(46, 168, 255, 0.5);
+  backdrop-filter: blur(10px);
+  font-size: 14px;
+  color: var(--ink-dim);
+}
+.ts-item b { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 28px; color: #e6f6ff; }
+.ts-item.state-paused b { color: #9fb3c4; }
+.ts-item.state-ringing { border-color: #ff6a3d; }
+
+#alarm {
+  position: fixed;
+  inset: 0;
+  z-index: 200000;
+  pointer-events: none; /* pinches and clicks go to the board, which stops the alarm */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: #fff;
+  background: radial-gradient(circle, #d8461c, #6e1200);
+  animation: alarm-pulse 0.8s ease-in-out infinite alternate;
+}
+#alarm[hidden] { display: none; }
+.al-label { font-size: clamp(28px, 5vw, 56px); font-weight: 700; }
+.al-big { font-size: clamp(64px, 14vw, 180px); font-weight: 900; letter-spacing: 0.02em; line-height: 1; text-shadow: 0 0 30px rgba(255, 200, 150, 0.9); }
+.al-over { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: clamp(36px, 7vw, 90px); }
+.al-hint { font-size: 18px; opacity: 0.85; margin-top: 12px; }
+@keyframes alarm-pulse {
+  from { filter: brightness(0.75); }
+  to { filter: brightness(1.15); }
+}
+
+#sound-badge {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 100000;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(60, 20, 10, 0.85);
+  border: 1px solid #ff8a5c;
+  color: #ffd6c4;
+  font-size: 14px;
+}
+#sound-badge[hidden] { display: none; }

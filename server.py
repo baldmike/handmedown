@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """handmedown local server.
 
-Serves the board (web/), a read-only JSON API over a folder of markdown
-notes, configured actions, and the live board: cards and session status that
-scripts (bin/hmd, Claude Code hooks) push and the page shows. Standard library
-only. Binds to 127.0.0.1.
+Serves the board (web/), configured actions, kitchen timers, Spotify control,
+and the live board: cards and session status that scripts (bin/hmd, session
+hooks) push and the page shows. Standard library only. Binds to 127.0.0.1.
 
     python3 server.py [--port 8800] [--config handmedown.json]
 """
@@ -27,12 +26,10 @@ WEB_DIR = ROOT / "web"
 DEFAULTS = {
     "name": "handmedown",
     "port": 8800,
-    "notes": "sample-notes",
     # Your own commands for the apps ring: each runs an argv list (no shell)
     # from the project folder. None by default; built-in apps live in the page.
     "actions": [],
 }
-MAX_NOTE_BYTES = 512 * 1024
 ACTION_TIMEOUT = 20
 MAX_OUTPUT_CHARS = 2000
 MAX_BODY = 1024 * 1024
@@ -40,6 +37,8 @@ STATE_FILE = ROOT / "state" / "board.json"
 TONES = ("info", "ok", "warn", "error", "ask")
 SESSION_STATES = ("idle", "working", "waiting", "done")
 MAX_CARDS = 100
+MAX_TIMERS = 4
+MAX_TIMER_SECONDS = 24 * 3600
 
 
 class Board:
@@ -55,10 +54,12 @@ class Board:
         self.version = 0
         self.cards = {}
         self.sessions = {}
+        self.timers = {}
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.cards = {c["id"]: c for c in saved.get("cards", [])}
             self.sessions = {s["source"]: s for s in saved.get("sessions", [])}
+            self.timers = {t["id"]: t for t in saved.get("timers", [])}
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
@@ -67,6 +68,8 @@ class Board:
             "version": self.version,
             "cards": list(self.cards.values()),
             "sessions": list(self.sessions.values()),
+            "timers": list(self.timers.values()),
+            "now": time.time(),
         }
 
     def _commit(self):
@@ -128,66 +131,79 @@ class Board:
                 raise ValueError(f"state must be one of {', '.join(SESSION_STATES)}, or off")
             self._commit()
 
+    # ---- timers: stored as end times, so they keep running while the page is
+    # hidden or closed, and through restarts.
+
+    def add_timer(self, seconds, label=""):
+        if type(seconds) not in (int, float) or not 1 <= seconds <= MAX_TIMER_SECONDS:
+            raise ValueError("seconds must be between 1 and 86400")
+        with self.changed:
+            if len(self.timers) >= MAX_TIMERS:
+                raise ValueError(f"at most {MAX_TIMERS} timers at once")
+            timer_id = uuid.uuid4().hex[:6]
+            now = time.time()
+            self.timers[timer_id] = {
+                "id": timer_id,
+                "label": str(label or "")[:60],
+                "seconds": seconds,
+                "state": "running",
+                "end": now + seconds,
+                "left": None,
+                "created": now,
+            }
+            self._commit()
+        return timer_id
+
+    def timer_op(self, timer_id, op, delta=0):
+        with self.changed:
+            if op == "dismiss-all":
+                ringing = [k for k, t in self.timers.items() if t["state"] == "ringing"]
+                for k in ringing:
+                    del self.timers[k]
+                if ringing:
+                    self._commit()
+                return bool(ringing)
+            t = self.timers.get(str(timer_id))
+            if t is None:
+                return False
+            now = time.time()
+            if op in ("cancel", "dismiss"):
+                del self.timers[t["id"]]
+            elif op == "pause" and t["state"] == "running":
+                t.update(state="paused", left=max(t["end"] - now, 1), end=None)
+            elif op == "resume" and t["state"] == "paused":
+                t.update(state="running", end=now + t["left"], left=None)
+            elif op == "adjust" and t["state"] in ("running", "paused"):
+                if type(delta) not in (int, float) or abs(delta) > MAX_TIMER_SECONDS:
+                    raise ValueError("delta must be a number of seconds")
+                if t["state"] == "running":
+                    t["end"] = max(t["end"] + delta, now + 1)
+                else:
+                    t["left"] = max(t["left"] + delta, 1)
+            elif op not in ("pause", "resume", "adjust"):
+                raise ValueError("op must be pause, resume, adjust, cancel, dismiss or dismiss-all")
+            else:
+                return True
+            self._commit()
+        return True
+
+    def ring_due(self):
+        """Mark running timers whose time is up as ringing. Returns them."""
+        now = time.time()
+        with self.changed:
+            due = [t for t in self.timers.values() if t["state"] == "running" and t["end"] <= now]
+            for t in due:
+                t["state"] = "ringing"
+            if due:
+                self._commit()
+        return due
+
     def wait(self, seen, timeout):
         """Block until the board moves past version `seen` (or timeout)."""
         with self.changed:
             if self.version == seen:
                 self.changed.wait(timeout)
             return self.snapshot() if self.version != seen else None
-
-
-def load_config(path):
-    config = dict(DEFAULTS)
-    if path.is_file():
-        with path.open(encoding="utf-8") as f:
-            config.update(json.load(f))
-    notes = Path(os.path.expanduser(str(config["notes"])))
-    if not notes.is_absolute():
-        notes = ROOT / notes
-    config["notes"] = notes.resolve()
-    config["actions"] = valid_actions(config.get("actions"))
-    return config
-
-
-def note_tree(notes_root):
-    """Group every .md file under notes_root by its folder (relative path)."""
-    groups = {}
-    for dirpath, dirnames, filenames in os.walk(notes_root):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-        rel_dir = Path(dirpath).relative_to(notes_root)
-        for name in sorted(filenames):
-            if name.startswith(".") or not name.lower().endswith(".md"):
-                continue
-            folder = rel_dir.as_posix() if rel_dir.parts else notes_root.name
-            groups.setdefault(folder, []).append(
-                {"title": name[:-3], "path": (rel_dir / name).as_posix()}
-            )
-    return [{"name": k, "notes": v} for k, v in groups.items()]
-
-
-def valid_actions(raw):
-    actions = []
-    for a in raw or []:
-        run = a.get("run") if isinstance(a, dict) else None
-        if isinstance(run, list) and run and all(isinstance(x, str) for x in run):
-            actions.append({"title": str(a.get("title") or run[0]), "run": run})
-        else:
-            print(f"handmedown: skipping bad action {a!r} (needs a non-empty 'run' list)")
-    return actions
-
-
-def run_action(action):
-    try:
-        done = subprocess.run(
-            action["run"], cwd=ROOT, capture_output=True, text=True,
-            timeout=ACTION_TIMEOUT, stdin=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        return {"ok": False, "output": f"command not found: {action['run'][0]}"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": f"timed out after {ACTION_TIMEOUT}s"}
-    output = (done.stdout + done.stderr).strip()[:MAX_OUTPUT_CHARS]
-    return {"ok": done.returncode == 0, "output": output}
 
 
 # Spotify on this Mac, through its AppleScript dictionary. Only these fixed
@@ -249,7 +265,7 @@ def spotify(cmd=None, step=0):
             time.sleep(0.15)
             waited += 0.15
             out = osascript(SPOTIFY_STATUS)
-    except (RuntimeError, subprocess.TimeoutExpired) as err:
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as err:
         return {"running": False, "error": str(err)}
     if out == "off":
         return {"running": False}
@@ -273,41 +289,61 @@ def spotify(cmd=None, step=0):
     }
 
 
-def note_target(notes_root, rel):
-    """Where a note may be written: a .md path inside notes_root whose folder
-    already exists. None for anything else."""
-    if not isinstance(rel, str) or not rel.lower().endswith(".md") or "\x00" in rel:
-        return None
-    target = (notes_root / rel).resolve()
-    if notes_root not in target.parents or not target.parent.is_dir():
-        return None
-    return target
+def notify(timer):
+    """A macOS notification, so a finished timer reaches you when the board
+    window isn't in front. Quietly does nothing elsewhere."""
+    if sys.platform != "darwin":
+        return
+    label = timer["label"] or "Timer"
+    script = 'display notification (item 1 of argv) with title "handmedown" sound name "Glass"'
+    script = f"on run argv\n{script}\nend run"
+    try:
+        subprocess.run(["osascript", "-e", script, f"{label}: time's up"],
+                       capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
-def write_note(notes_root, rel, markdown, create):
-    target = note_target(notes_root, rel)
-    if target is None:
-        raise ValueError("notes can only be saved as .md files inside the notes folder")
-    if not isinstance(markdown, str) or len(markdown.encode("utf-8")) > MAX_NOTE_BYTES:
-        raise ValueError("note is missing or too large")
-    if create and target.exists():
-        raise FileExistsError(rel)
-    if not create and not target.is_file():
-        raise FileNotFoundError(rel)
-    tmp = target.with_name(f".{target.name}.handmedown-tmp")
-    tmp.write_text(markdown, encoding="utf-8")
-    tmp.replace(target)
-    return target.relative_to(notes_root).as_posix()
+def watch_timers(board):
+    while True:
+        for timer in board.ring_due():
+            print(f"handmedown: timer {timer['label'] or timer['id']!r} is up", flush=True)
+            threading.Thread(target=notify, args=(timer,), daemon=True).start()
+        time.sleep(0.25)
 
 
-def resolve_note(notes_root, rel):
-    """Return the real path of a note, or None if it escapes notes_root."""
-    if not rel or not rel.lower().endswith(".md"):
-        return None
-    target = (notes_root / rel).resolve()
-    if target != notes_root and notes_root not in target.parents:
-        return None
-    return target if target.is_file() else None
+def load_config(path):
+    config = dict(DEFAULTS)
+    if path.is_file():
+        with path.open(encoding="utf-8") as f:
+            config.update(json.load(f))
+    config["actions"] = valid_actions(config.get("actions"))
+    return config
+
+
+def valid_actions(raw):
+    actions = []
+    for a in raw or []:
+        run = a.get("run") if isinstance(a, dict) else None
+        if isinstance(run, list) and run and all(isinstance(x, str) for x in run):
+            actions.append({"title": str(a.get("title") or run[0]), "run": run})
+        else:
+            print(f"handmedown: skipping bad action {a!r} (needs a non-empty 'run' list)")
+    return actions
+
+
+def run_action(action):
+    try:
+        done = subprocess.run(
+            action["run"], cwd=ROOT, capture_output=True, text=True,
+            timeout=ACTION_TIMEOUT, stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "output": f"command not found: {action['run'][0]}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": f"timed out after {ACTION_TIMEOUT}s"}
+    output = (done.stdout + done.stderr).strip()[:MAX_OUTPUT_CHARS]
+    return {"ok": done.returncode == 0, "output": output}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -387,30 +423,17 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.host_ok():
             return self.send_json({"error": "forbidden host"}, HTTPStatus.FORBIDDEN)
 
-        notes_root = self.config["notes"]
         if url.path == "/api/board":
             with self.board.changed:
                 snap = self.board.snapshot()
             return self.send_json(snap)
         if url.path == "/api/events":
             return self.stream_events()
+        if url.path == "/api/spotify":
+            return self.send_json(spotify())
         if url.path == "/api/config":
             titles = [a["title"] for a in self.config["actions"]]
             return self.send_json({"name": self.config["name"], "actions": titles})
-        if url.path == "/api/spotify":
-            return self.send_json(spotify())
-        if url.path == "/api/notes":
-            if not notes_root.is_dir():
-                return self.send_json({"folders": [], "error": "notes folder not found"})
-            return self.send_json({"folders": note_tree(notes_root)})
-        if url.path == "/api/note":
-            rel = parse_qs(url.query).get("path", [""])[0]
-            target = resolve_note(notes_root, rel)
-            if target is None:
-                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-            with target.open("rb") as f:
-                text = f.read(MAX_NOTE_BYTES).decode("utf-8", errors="replace")
-            return self.send_json({"title": target.stem, "path": rel, "markdown": text})
         return self.send_json({"error": "unknown endpoint"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
@@ -428,18 +451,15 @@ class Handler(SimpleHTTPRequestHandler):
             if url.path == "/api/remove":
                 found = self.board.remove(data.get("id"), everything=data.get("all") is True)
                 return self.send_json({"removed": found})
+            if url.path == "/api/timer":
+                op = data.get("op", "add")
+                if op == "add":
+                    return self.send_json({"id": self.board.add_timer(data.get("seconds"), data.get("label"))})
+                found = self.board.timer_op(data.get("id"), op, data.get("delta", 0))
+                return self.send_json({"ok": found})
             if url.path == "/api/status":
                 self.board.set_status(data.get("source"), data.get("state"), data.get("label"))
                 return self.send_json({"ok": True})
-            if url.path == "/api/note":
-                rel = write_note(self.config["notes"], data.get("path"), data.get("markdown"),
-                                 create=data.get("create") is True)
-                print(f"handmedown: saved note {rel}", flush=True)
-                return self.send_json({"path": rel})
-        except FileExistsError:
-            return self.send_json({"error": "a note with that name already exists"}, HTTPStatus.CONFLICT)
-        except FileNotFoundError:
-            return self.send_json({"error": "no such note"}, HTTPStatus.NOT_FOUND)
         except ValueError as err:
             return self.send_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
 
@@ -472,10 +492,10 @@ def main():
     port = args.port or int(config["port"])
     Handler.config = config
     Handler.board = Board(STATE_FILE)
+    threading.Thread(target=watch_timers, args=(Handler.board,), daemon=True).start()
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True  # open event streams mustn't block shutdown
-    print(f"handmedown: notes from {config['notes']}")
     print(f"handmedown: open http://127.0.0.1:{port}/ in Chrome")
     try:
         server.serve_forever()

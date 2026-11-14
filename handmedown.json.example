@@ -1,6 +1,5 @@
 {
   "name": "handmedown",
   "port": 8800,
-  "notes": "sample-notes",
   "actions": []
 }
