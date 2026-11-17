@@ -71,10 +71,12 @@ move, stretch with two hands, and close with ✕.
 
 - **tapping a preset**: 1, 3, 5, 10, 15 or 20 minutes. The buttons are big
   enough to air-tap from across the room.
-- **holding up fingers**: hold up as many fingers as minutes, still, for about
-  a second. A bar fills as it locks in. A thumbs-up is 1; two hands add up, to
-  10. A lone pointing index finger doesn't count (it's for aiming), and after
-  a timer starts, drop your hands before counting the next one.
+- **holding up fingers**: hold up as many fingers as minutes, still, for
+  about a second and a half. A bar fills, then a big **▶ start N min** button
+  appears: tap it to start the timer. A thumbs-up is 1; two hands add up, to
+  10. The count never starts a timer by itself, so a hand that's just in view
+  only changes the number on the button. A lone pointing index finger doesn't
+  count (it's for aiming, so you can point at the button to tap it).
 
 Each timer gets a row with a huge countdown, **−1 / +1 / +5** minutes, **❚❚**
 to pause or resume, and **✕** to cancel. Up to four run at once. Close the
@@ -113,12 +115,12 @@ Hand signs go to **one app at a time: the one you last opened or touched**
 music, and a thumbs-down for the next song can't start a timer. Pinch the
 Spotify window to hand the signs back to it. With Spotify in use:
 
-- 👈 **swipe an open hand to the left**, fast and across a quarter of the screen: previous song
+- 👈 **swipe an open hand to the left**, fast and across about a fifth of the screen: previous song (a near miss tells you on the status line: faster, or further)
 - 👉 **swipe an open hand to the right**, the same: next song
 - ☝️ **point a finger straight up** and hold it for most of a second: volume up, 5 at a time while you hold it
 - 👇 **point a finger straight down**, the same: volume down
 - 👎 **thumbs down** (a fist, thumb pointing down), held for a second: next song
-- ✋ **open hand up**, fingers pointing up, held still for a second and a half: pause (or play, if it's paused)
+- ✋ **open hand up**, fingers pointing up, held still for 3 seconds: pause (or play, if it's paused). Raise it fresh: a hand that's already open when Spotify comes up, or just after a pinch or tap, doesn't count, so opening Spotify never stops the music
 
 A sign fires once; drop your hand or change the sign to do it again. Pointing
 at a button doesn't change the volume, so air-tapping still works. The first
@@ -188,12 +190,12 @@ up after 2 seconds and exits quietly.
 | Gesture | What it does |
 | --- | --- |
 | Tap (quick pinch) | Open the apps ring or an app; press any button in an app |
-| Hold up fingers, still (Timers in use) | Start a timer for that many minutes (👍 = 1, two hands add) |
 | Pinch anywhere, open palm, click or any key (timer ringing) | Stop the alarm |
 | Pinch and drag | Move a card |
 | Let go | Set it down right there |
 | Flick hard as you let go | Throw it: it bounces off the screen edges, never more than halfway off |
 | Both hands pinch one card | Pull apart or push together to resize |
+| Hold up fingers, still, then tap ▶ start (Timers in use) | Start a timer for that many minutes (👍 = 1, two hands add) |
 | Point (index finger only) at a key, then a quick dip of the fingertip | Press it (air tap) |
 | Two fingers out (index and middle), pointing up or down | Scroll whatever is under your hand; hold fingers sideways to pause |
 | Two fingers out, quick swipe across a pushed card | Flick it off the screen and dismiss it |

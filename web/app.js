@@ -34,15 +34,16 @@ const VOLUME_EVERY_MS = 400;  // ...then a step this often
 const VOLUME_STEP = 5;
 // Spotify hand signs, held still this long: thumbs down for the next song,
 // palm to the camera to pause.
-const POSE_HOLD_MS = { "thumbs-down": 1000, palm: 1500 };
+const POSE_HOLD_MS = { "thumbs-down": 1000, palm: 3000 };
 const POSE_GRACE_MS = 150;    // a sign missed for a frame or two still counts as held
 // Swipes (open hand, sideways): left for the previous song, right for the next.
-const SWIPE_SPEED = 1400;     // px/s: a stroke's top speed must reach this...
-const SWIPE_MIN_FRAC = 0.25;  // ...and it must cover this share of the screen width
+const SWIPE_SPEED = 1100;     // px/s: a stroke's top speed must reach this...
+const SWIPE_MIN_FRAC = 0.18;  // ...and it must cover this share of the screen width
 const SWIPE_MOVING = 250;     // px/s sideways: slower than this, a stroke has ended
 const SWIPE_SETTLE_MS = 250;  // after a stroke, wait this long for a faster one the other way (the real swipe after a wind-up)
 const SWIPE_COOLDOWN_MS = 1500; // one song per swipe, even as the hand swings back
 const PALM_AFTER_SWIPE_MS = 2000; // a hand coming to rest open after a swipe isn't a pause
+const PALM_AFTER_PINCH_MS = 2000; // an open hand this soon after letting go of a pinch is just a hand, not a pause
 const PALM_STILL_PX_S = 300;  // the palm must be this still (at the knuckles): a hand moving the cursor isn't a stop sign
 const TAP_DIP = 0.82;       // air tap: fingertip reach drops below this share of its usual...
 const TAP_BACK = 0.92;     // ...and returns above this share...
@@ -263,6 +264,7 @@ function poseStep(p, pose, now) {
   else if (p.pose && now - p.poseSeen < POSE_GRACE_MS) pose = p.pose;
   if (pose !== p.pose) {
     p.pose = pose;
+    p.poseBegan = now;
     p.poseSince = now;
     p.poseFired = false;
   }
@@ -286,6 +288,9 @@ function poseStep(p, pose, now) {
     // (Only a fast stroke counts; a resting hand's jitter makes slow ones.)
     const swiping = (p.stroke && p.stroke.peak >= SWIPE_SPEED) || p.swipe || now - (p.swipeAt ?? -Infinity) < PALM_AFTER_SWIPE_MS;
     if (swiping) p.poseSince = now;
+    // Raised before Spotify was in use, or the open hand left by letting go
+    // of a pinch (as when you open Spotify): not a stop sign.
+    if (p.poseBegan < spotifyFocusAt || p.poseBegan - (p.upAt ?? -Infinity) < PALM_AFTER_PINCH_MS) p.poseSince = now;
   }
   if (now - p.poseSince < POSE_HOLD_MS[pose]) return;
   p.poseFired = true;
@@ -332,7 +337,15 @@ function swipeStep(p, openHand, now) {
 // A finished stroke: keep it as the swipe if it qualifies and beats the last.
 function strokeDone(p, st, now) {
   const dx = st.x1 - st.x0, dy = st.y1 - st.y0;
-  if (!st.open || st.peak < SWIPE_SPEED || Math.abs(dx) < innerWidth * SWIPE_MIN_FRAC || Math.abs(dx) < 1.5 * Math.abs(dy)) return;
+  if (!st.open || Math.abs(dx) < 1.2 * Math.abs(dy)) return;
+  const fast = st.peak >= SWIPE_SPEED, far = Math.abs(dx) >= innerWidth * SWIPE_MIN_FRAC;
+  if (!fast || !far) {
+    // Close, but not quite: say what was missing, so a real swipe can be fixed.
+    if (st.peak >= SWIPE_SPEED * 0.6 && Math.abs(dx) >= innerWidth * SWIPE_MIN_FRAC * 0.6) {
+      say(!fast && !far ? "swipe: faster and further" : !fast ? "swipe: a little faster" : "swipe: a little further");
+    }
+    return;
+  }
   if (!p.swipe || st.peak > p.swipe.peak) p.swipe = { dir: st.dir, peak: st.peak, endT: now };
 }
 
@@ -433,7 +446,8 @@ function airTapStep(p, pointing, tap, now) {
   while (p.aimTrail.length > 1 && now - p.aimTrail[1].t > AIM_LAG_MS) p.aimTrail.shift();
   if (tap === "down") p.tapKey = p.aimTrail[0].key;
   else if (tap === "cancel") p.tapKey = null;
-  else if (tap === "tap" && p.tapKey) {
+  else if (tap === "tap") p.upAt = now; // the hand opening after a tap isn't a stop sign either
+  if (tap === "tap" && p.tapKey) {
     const key = p.tapKey;
     p.tapKey = null;
     const card = cards.get(Number(key.closest(".card")?.dataset.id));
@@ -516,6 +530,7 @@ function pinchDown(p, now) {
 
 function pinchUp(p, now, lost) {
   p.pinching = false;
+  p.upAt = now; // last let go of a pinch (or air-tapped)
   if (p.dismissed) {
     p.dismissed = false;
     return;
@@ -667,7 +682,12 @@ const OPEN_APPS_STORE = "handmedown.openApps";
 // So holding up fingers for a timer can't pause Spotify, and the other way round.
 let focusedApp = null;
 
+// When Spotify last became the app in use: a palm already up then (the hand
+// that opened it) doesn't pause it; it has to come down and go up again.
+let spotifyFocusAt = -Infinity;
+
 function focusApp(name) {
+  if (name === "spotify" && focusedApp !== "spotify") spotifyFocusAt = performance.now();
   focusedApp = name;
   for (const [n, card] of windows) card.el.classList.toggle("focused", n === name && !card.removing);
 }
@@ -1082,9 +1102,10 @@ function trackHands(now) {
     const openHand = !pinching && out(8, 6) && out(12, 10) && out(16, 14) && out(20, 18);
     // Fingers held up, for setting a timer. The thumb counts when it's well
     // clear of the hand (a thumbs-up is 1). A lone index finger is pointing,
-    // which aims and air-taps, so it counts as nothing.
+    // which aims and air-taps, so it counts as nothing. Pinching or pointing
+    // is null: aiming at the start button mustn't change the count on it.
     const thumbUp = thumbOut > 0.75 && (t2y - ty) / Math.max(dist(t2x, t2y, tx, ty), 1) > 0.3;
-    const fingers = pinching || pointing ? 0
+    const fingers = pinching || pointing ? null
       : [out(8, 6), out(12, 10), out(16, 14), out(20, 18), thumbUp].filter(Boolean).length;
 
     // Which way those two fingers point: knuckle-to-tip, vertical share.
@@ -1113,7 +1134,7 @@ function trackHands(now) {
 // Every hand's fingers, added up, for the Timers window when it's the app in use.
 function countFingers(now) {
   const hands = [...pointers.values()].filter((p) => p.id !== "mouse");
-  if (focusedApp !== "timers") return timers.count(null, false, now);
+  if (focusedApp !== "timers" || !hands.length || hands.some((p) => p.fingers === null)) return timers.count(null, false, now);
   let total = 0, steady = true;
   for (const p of hands) {
     total += p.fingers || 0;

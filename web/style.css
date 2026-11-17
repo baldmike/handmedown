@@ -465,6 +465,7 @@ html, body {
 .card.timers.counting .tm-count-text { font-size: 26px; font-weight: 700; color: #ffd27a; }
 .tm-count-bar { height: 6px; margin-top: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
 .tm-count-fill { height: 100%; width: 0; background: #ffd27a; transition: width 80ms linear; }
+.tm-go { width: 100%; height: 72px; margin-top: 10px; font-size: 28px; font-weight: 700; color: #ffd27a; }
 .tm-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
 .tm-empty { color: var(--ink-dim); text-align: center; padding: 14px; }
 .tm-timer {

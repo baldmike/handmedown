@@ -8,7 +8,11 @@
 //   - the alarm: full screen, loud, until a pinch, a palm, a click or a key
 
 const PRESETS = [1, 3, 5, 10, 15, 20];
-const COUNT_HOLD_MS = 1200; // hold the same finger count this long to start a timer
+// Holding up fingers picks the minutes; it never starts a timer by itself
+// (a hand that's just in view reads as a count, usually 4). It puts the
+// number on a start button, and a tap on that starts it.
+const COUNT_HOLD_MS = 1500; // hold the same finger count this long to put it on the start button
+const COUNT_HINT = "or hold up fingers for the minutes (👍 = 1, two hands add up), then tap start";
 const MAX_COUNT = 10;
 const CHIME_EVERY_MS = 1600;
 
@@ -31,8 +35,9 @@ export const timersHtml = `
     ${PRESETS.map((m) => `<button data-key="add:${m}" tabindex="-1">${m}<small>min</small></button>`).join("")}
   </div>
   <div class="tm-count">
-    <div class="tm-count-text">or hold up fingers: 👍 = 1, two hands add up</div>
+    <div class="tm-count-text">${COUNT_HINT}</div>
     <div class="tm-count-bar"><div class="tm-count-fill"></div></div>
+    <button class="tm-go" data-key="go" tabindex="-1" hidden></button>
   </div>
   <div class="tm-list"></div>`;
 
@@ -45,7 +50,7 @@ export class Timers {
     this.root = null;      // the open Timers window, if any
     this.shape = "";       // what the window's rows were built for
     this.counting = null;  // { n, since } while a finger count is locking in
-    this.armed = true;     // a count only fires again after the hands drop
+    this.pending = null;   // minutes on the start button, from a finger count
     this.audio = null;
     this.lastChime = -Infinity;
 
@@ -118,6 +123,7 @@ export class Timers {
   attach(root) {
     this.root = root;
     this.shape = "";
+    this.pending = null;
     this.renderRows();
     return this;
   }
@@ -129,6 +135,11 @@ export class Timers {
   press(key) {
     const [what, arg, extra] = key.split(":");
     if (what === "add") return this.start(Number(arg));
+    if (what === "go") {
+      const n = this.pending;
+      this.setPending(null);
+      return n && this.start(n);
+    }
     const t = this.list.find((x) => x.id === arg);
     if (!t) return;
     if (what === "toggle") this.op({ op: t.state === "paused" ? "resume" : "pause", id: t.id });
@@ -162,32 +173,37 @@ export class Timers {
   // ---- finger count
 
   // Called every frame with the fingers held up across both hands (null when
-  // counting doesn't apply). `steady` is false while a hand is moving.
+  // counting doesn't apply: no hand in view, or one pinching or pointing).
+  // `steady` is false while a hand is moving. A count held still goes on the
+  // start button; only tapping that starts the timer.
   count(n, steady, nowMs) {
     const fill = this.root?.querySelector(".tm-count-fill");
     const text = this.root?.querySelector(".tm-count-text");
     const reset = () => {
       this.counting = null;
       if (fill) fill.style.width = "0";
-      if (text) text.textContent = "or hold up fingers: 👍 = 1, two hands add up";
+      if (text) text.textContent = COUNT_HINT;
       this.root?.classList.remove("counting");
     };
-    if (n === null || !this.open || this.ringing) return reset();
-    if (n === 0) {
-      this.armed = true;
-      return reset();
-    }
-    if (!this.armed) return;
+    if (!n || !this.open || this.ringing) return reset();
     n = Math.min(n, MAX_COUNT);
+    if (n === this.pending) return reset(); // already on the button
     if (!steady || this.counting?.n !== n) this.counting = { n, since: nowMs };
     const k = Math.min(1, (nowMs - this.counting.since) / COUNT_HOLD_MS);
     this.root.classList.add("counting");
     if (fill) fill.style.width = `${k * 100}%`;
     if (text) text.textContent = `${n} min: hold still…`;
     if (k < 1) return;
-    this.armed = false;
     reset();
-    this.start(n);
+    this.setPending(n);
+  }
+
+  setPending(n) {
+    this.pending = n;
+    const go = this.root?.querySelector(".tm-go");
+    if (!go) return;
+    go.hidden = n === null;
+    go.textContent = n === null ? "" : `▶ start ${n} min`;
   }
 
   // ---- sound
