@@ -1,5 +1,12 @@
 # handmedown
 
+> **handmedown is a fork of [barehands](https://github.com/jaredrhod/barehands)
+> by [Jared Rhodenizer (@jaredrhod)](https://github.com/jaredrhod).** The
+> hand-tracked board, the glass cards, pinch, throw and stretch, and the idea
+> of it all are his work. handmedown takes that and points it at the kitchen.
+> Full credit to Jared: go see the original at
+> [github.com/jaredrhod/barehands](https://github.com/jaredrhod/barehands).
+
 Kitchen timers and music you run with your hands, from across the room.
 
 handmedown tracks your hands through the camera and puts glass cards on
@@ -246,12 +253,22 @@ state/            board contents and server log (not committed)
 
 ## Credits
 
+handmedown is a fork of [barehands](https://github.com/jaredrhod/barehands) by
+[Jared Rhodenizer (@jaredrhod)](https://github.com/jaredrhod), and builds
+entirely on his work: the webcam hand tracking interface, the glass cards and
+the gestures to grab, throw and resize them, letting scripts and your AI push
+to the board, and the Claude Code hooks that show your sessions on it. What
+handmedown adds (Timers, Spotify hand signs, look to choose) sits on top of his
+foundation. Find more of his work at
+[jaredrhod.com](https://jaredrhod.com).
+
 Hand tracking by [Google MediaPipe](https://developers.google.com/mediapipe)
 (Apache 2.0), loaded from a CDN and not redistributed here.
 
 ## License
 
-Copyright (C) 2026 baldmike
+Copyright (c) 2026 Jared Rhodenizer (original barehands)\
+Copyright (C) 2026 baldmike (handmedown changes)
 
-handmedown is free software under the GNU Affero General Public License,
-version 3 or later. See [LICENSE](LICENSE).
+handmedown, like barehands, is free software under the GNU Affero General
+Public License, version 3 or later. See [LICENSE](LICENSE).
